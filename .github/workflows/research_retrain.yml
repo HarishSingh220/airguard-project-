@@ -1,0 +1,75 @@
+name: Research retrain (tuning + SHAP)
+
+# The research/exploratory path, split out of rebuild_forecast.yml: walk-forward
+# tuning and SHAP are slow (up to ~2h) and only need to run when you actually want
+# to re-tune or re-explain the models, not on every daily schedule. This workflow
+# re-exports fresh data first (so tuning sees live data too), then runs the notebook
+# with RUN_TUNING/RUN_SHAP left at their notebook defaults (True), and commits only
+# the executed notebook plus the params/ensemble-weights/SHAP files it produces --
+# not features/outputs/*, which the daily rebuild_forecast.yml workflow already
+# owns and refreshes on its own schedule.
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"      # weekly, Sunday 02:00 UTC -- adjust or drop if you'd rather trigger manually only
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150     # walk-forward tuning + SHAP over the full history can be slow;
+                              # narrow WF_START or turn sections off at the top of the notebook if this times out
+    permissions:
+      contents: write        # needed to commit the executed notebook and tuning outputs back to the repo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ingestion dependencies
+        working-directory: ingestion
+        run: pip install -r requirements.txt
+
+      - name: Install modeling dependencies
+        run: |
+          pip install pandas numpy scikit-learn xgboost lightgbm statsmodels shap \
+                     matplotlib seaborn scipy jupyter nbconvert ipykernel
+
+      - name: Export combined historical + live data from Postgres
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python ingestion/export_for_modeling.py
+
+      - name: Regenerate fire_daily_features.csv (historical + live, via fire_features.py)
+        run: python ingestion/rebuild_fire_daily.py
+
+      - name: Build the daily feature table
+        run: python build_features.py
+
+      - name: Check live-feature data quality (Finding 5)
+        run: python ingestion/data_quality_check.py
+
+      - name: Execute the walk-forward tuning / SHAP notebook
+        # RUN_TUNING / RUN_SHAP stay at the notebook's own hardcoded True here -- this
+        # workflow's entire purpose is to refresh them -- unlike rebuild_forecast.yml,
+        # which never touches or runs this notebook at all.
+        run: |
+          jupyter nbconvert --to notebook --execute --inplace \
+            --ExecutePreprocessor.timeout=8000 \
+            baseline_walkforward_CLEAN_v9.ipynb
+
+      - name: Build the production models with the freshly-tuned params
+        run: python build_final_models.py
+
+      - name: Commit the executed notebook and tuning/SHAP outputs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Research retrain: walk-forward tuning + SHAP"
+          # Deliberately NOT features/* or outputs/forecast_10d_*.csv -- those are
+          # rebuild_forecast.yml's responsibility on its own daily schedule, so this
+          # workflow doesn't fight it over the same files or commit a stale forecast.
+          file_pattern: >-
+            baseline_walkforward_CLEAN_v9.ipynb params/* best_params_*.json
+            ensemble_weights_*.json outputs/shap/* outputs/models/*

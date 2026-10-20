@@ -1,0 +1,8 @@
+pandas
+numpy
+requests
+sqlalchemy>=2.0
+psycopg2-binary
+cdsapi>=0.7
+xarray
+netCDF4

@@ -1,0 +1,17 @@
+# created by virtualenv automatically
+__pycache__/
+airguard/
+delhi_aqi_features.csv
+final_delhi_dataset.csv
+
+
+# ingestion-related (regenerated from Postgres by export_for_modeling.py / rebuild_fire_daily.py)
+live_fire_modis.csv
+live_fire_viirs.csv
+combined_fire_modis.csv
+combined_fire_viirs.csv
+weather_forecast_future_surface.csv
+weather_forecast_future_pressure.csv
+weather_forecast_future_cams.csv
+.cdsapirc
+.env

@@ -1,0 +1,89 @@
+name: Retrain production models (30-day cycle)
+
+# Walk-forward style periodic retrain: refits the four ensemble members
+# (LightGBM, XGBoost, RandomForest, Ridge) on all data available as of today,
+# using the SAME tuned hyperparameters and ensemble weights every single time
+# (best_params_*.json / ensemble_weights_*.json are read, never written, by
+# this workflow -- no tuning happens here, only fitting; see
+# train_production_models.py). rebuild_forecast.yml's daily run then just
+# loads whatever this workflow last saved and predicts -- it never fits a
+# model itself.
+#
+# Runs this cheap check daily rather than on a fixed "1st of the month" cron:
+# check_retrain_due.py queries ingestion_log for the last successful retrain
+# and only lets the expensive steps below run once ~30 days have actually
+# passed. That makes the schedule robust to a missed or failed run -- it
+# retrains as soon as it notices it's overdue, instead of waiting for a fixed
+# calendar date it already missed.
+
+on:
+  schedule:
+    - cron: "30 1 * * *"      # daily, 01:30 UTC -- 30 min after rebuild_forecast.yml's
+                               # daily 01:00 UTC run, so a retrain (when due) trains on
+                               # the same day's freshly rebuilt features
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Retrain now even if 30 days haven't passed yet"
+        type: boolean
+        default: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write        # needed to commit outputs/models/ back to the repo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ingestion dependencies
+        working-directory: ingestion
+        run: pip install -r requirements.txt
+
+      - name: Check whether a retrain is due
+        id: gate
+        working-directory: ingestion
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FORCE_RETRAIN: ${{ github.event.inputs.force }}
+        run: python check_retrain_due.py
+
+      - name: Install modeling dependencies
+        if: steps.gate.outputs.due == 'true'
+        run: pip install pandas numpy scikit-learn xgboost lightgbm joblib
+
+      - name: Export combined historical + live data from Postgres
+        if: steps.gate.outputs.due == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python ingestion/export_for_modeling.py
+
+      - name: Regenerate fire_daily_features.csv (historical + live)
+        if: steps.gate.outputs.due == 'true'
+        run: python ingestion/rebuild_fire_daily.py
+
+      - name: Build the daily feature table
+        if: steps.gate.outputs.due == 'true'
+        run: python build_features.py
+
+      - name: Check live-feature data quality
+        if: steps.gate.outputs.due == 'true'
+        run: python ingestion/data_quality_check.py
+
+      - name: Retrain production models (fixed params + weights -- fit only, no tuning)
+        if: steps.gate.outputs.due == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}   # so train_production_models.py can log completion
+        run: python train_production_models.py
+
+      - name: Commit retrained models
+        if: steps.gate.outputs.due == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Scheduled 30-day retrain: refit production models on latest data"
+          file_pattern: outputs/models/*

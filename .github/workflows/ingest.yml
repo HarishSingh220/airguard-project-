@@ -1,0 +1,37 @@
+name: Ingest live data
+
+on:
+  schedule:
+    - cron: "15 */3 * * *"   # every 3 hours, 15 minutes past, UTC
+  workflow_dispatch: {}      # lets you trigger a run manually from the Actions tab
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ingestion
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write ~/.cdsapirc for the Copernicus ADS client
+        run: |
+          cat > ~/.cdsapirc << EOF
+          url: ${{ secrets.CDSAPI_URL }}
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Run all fetchers
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          CPCB_API_KEY: ${{ secrets.CPCB_API_KEY }}
+        run: python run_all.py
