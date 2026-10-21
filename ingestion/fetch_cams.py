@@ -14,10 +14,21 @@ writes that file from the two secrets before this script runs, so it works
 the same locally if you already have ~/.cdsapirc set up (in which case
 CDSAPI_URL/CDSAPI_KEY need not be set as environment variables).
 
-Format note: this dataset now only accepts "data_format": "netcdf_zip" (not
-plain "netcdf") when requesting the full leadtime range -- confirmed via the
-ADS web form's "Show API request". The download is therefore a .zip archive
-containing the .nc file(s), which fetch()/to_dataframe() unzip before reading.
+Format note: this dataset now only accepts "netcdf_zip" (not plain "netcdf")
+when requesting the full leadtime range -- confirmed via the ADS web form's
+"Show API request". The download is therefore a .zip archive containing the
+.nc file(s), which fetch()/to_dataframe() unzip before reading.
+
+Key name note: the request below sends this as "format" (the pre-2025 key),
+not "data_format". cdsapi routes cdsapi.Client().retrieve() calls through a
+bundled legacy-compatibility shim (visible in tracebacks as
+ecmwf/datastores/legacy_client.py) that translates the old "format" key into
+whatever the new backend needs. Sending "data_format": "netcdf_zip" directly
+was observed going out over the wire as "data_format": "netcdf" -- the "_zip"
+silently dropped, reproducing the exact 400 this was meant to fix -- so the
+old key name is used here instead to go through that translation path rather
+than around it. If ADS changes again, re-check both this and the data_format
+spelling against the web form's "Show API request".
 
 If the exact variable or dataset names below have changed on ADS (Copernicus
 has renamed things before), run `cdsapi` against the ADS web form's "Show API
@@ -53,7 +64,7 @@ def build_request():
     box = [DELHI_LAT + 0.5, DELHI_LON - 0.5, DELHI_LAT - 0.5, DELHI_LON + 0.5]  # N, W, S, E
     return {
         "variable": VARIABLES, "date": [f"{today}/{today}"], "time": ["00:00"],
-        "leadtime_hour": LEADTIME_HOURS, "type": ["forecast"], "data_format": "netcdf_zip",
+        "leadtime_hour": LEADTIME_HOURS, "type": ["forecast"], "format": "netcdf_zip",
         "area": box,
     }
 
