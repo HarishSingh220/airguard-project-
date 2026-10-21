@@ -96,7 +96,7 @@ def build_request(kind, lo, hi):
     if kind == "cams-no2-o3":
         box = [DELHI_LAT + 0.5, DELHI_LON - 0.5, DELHI_LAT - 0.5, DELHI_LON + 0.5]
         return {
-            "variable": ["nitrogen_dioxide", "total_column_ozone"],
+            "variable": ["total_column_nitrogen_dioxide", "total_column_ozone"],
             "date": [f"{lo}/{hi}"], "time": ["00:00"],
             # Only this day's own near-term hours, not the full 120h lead forecast --
             # for a backfill we want each day's own best estimate, not next week's forecast of it.
@@ -191,8 +191,13 @@ def load_cams_no2_o3():
         df = point.to_dataframe().reset_index()
         time_col = "valid_time" if "valid_time" in df.columns else ("time" if "time" in df.columns else "forecast_time")
         out = pd.DataFrame({"valid_time": pd.to_datetime(df[time_col], utc=True)})
-        if "no2" in df.columns:
-            out["cams_no2_col"] = df["no2"]
+        # "tcno2" matches total_column_nitrogen_dioxide in build_request() above --
+        # NOT "no2", which is the different multi-level variable this no longer requests.
+        if "tcno2" in df.columns:
+            out["cams_no2_col"] = df["tcno2"]
+        else:
+            print(f"WARNING: [cams-no2-o3] {key}: expected variable 'tcno2' not found. "
+                  f"Columns actually present: {sorted(df.columns)}.")
         if "gtco3" in df.columns:
             out["cams_o3_col_du"] = df["gtco3"]
         out = out.groupby("valid_time", as_index=False).mean(numeric_only=True)

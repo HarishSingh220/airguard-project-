@@ -17,6 +17,9 @@ history in cpcb_hourly itself.
 If a station in config.STATIONS does not appear in the response, the exact name
 CPCB uses may have changed; run this file directly to print the station names
 seen and fix config.STATIONS.cpcb_name.
+
+If config.CPCB_PROXY_URL is set, requests go through that relay instead of
+straight to api.data.gov.in -- see cpcb_proxy_worker.js and config.py's docstring.
 """
 import sys
 from datetime import datetime, timezone
@@ -24,13 +27,26 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 
-from config import CPCB_API_KEY, STATIONS
+from config import CPCB_API_KEY, CPCB_PROXY_URL, STATIONS
 from db import get_engine, init_schema, log_run, upsert_dataframe
 from http_utils import get_with_retry
 
 RESOURCE = "3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
-BASE_URL = f"https://api.data.gov.in/resource/{RESOURCE}"
+RESOURCE_PATH = f"/resource/{RESOURCE}"
+DIRECT_URL = f"https://api.data.gov.in{RESOURCE_PATH}"
 PAGE_SIZE = 500
+
+
+def request_url():
+    """CPCB_PROXY_URL, if set, points at a relay (see cpcb_proxy_worker.js) that
+    forwards this same /resource/<id> path to api.data.gov.in from a non-GitHub-
+    Actions IP -- some of data.gov.in's outages/blocks have been specific to GH
+    Actions runner ranges, which a relay sidesteps without changing anything else
+    about the request (same params, same api-key, sent as a query param either way).
+    Read at call time, not import time, so setting/clearing the env var takes
+    effect without needing to reload this module.
+    """
+    return f"{CPCB_PROXY_URL}{RESOURCE_PATH}" if CPCB_PROXY_URL else DIRECT_URL
 
 # CPCB's pollutant_id strings -> the names build_features.py/export_for_modeling.py use.
 # Keys MUST be upper-case: build_dataframe() looks this dict up with
@@ -45,9 +61,11 @@ assert all(k == k.upper() for k in POLLUTANT_MAP), "POLLUTANT_MAP keys must be u
 
 
 def fetch_all_records(state="Delhi"):
+    url = request_url()
+    print(f"fetching via proxy {CPCB_PROXY_URL}" if CPCB_PROXY_URL else "fetching api.data.gov.in directly")
     records, offset = [], 0
     while True:
-        resp = get_with_retry(BASE_URL, params={
+        resp = get_with_retry(url, params={
             "api-key": CPCB_API_KEY, "format": "json", "limit": PAGE_SIZE, "offset": offset,
             "filters[state]": state,
         }, timeout=30, max_attempts=6, backoff=5.0)
