@@ -46,4 +46,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
           CPCB_API_KEY: ${{ secrets.CPCB_API_KEY }}
+          # Optional -- see ingestion/cpcb_proxy_worker.js. Leave the repo
+          # secret unset and this is simply empty, which fetch_cpcb.py treats
+          # as "call api.data.gov.in directly" (today's behavior).
+          CPCB_PROXY_URL: ${{ secrets.CPCB_PROXY_URL }}
         run: python run_all.py

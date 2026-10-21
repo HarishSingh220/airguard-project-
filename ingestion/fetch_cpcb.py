@@ -24,12 +24,18 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 
-from config import CPCB_API_KEY, STATIONS
+from config import CPCB_API_KEY, CPCB_PROXY_URL, STATIONS
 from db import get_engine, init_schema, log_run, upsert_dataframe
 from http_utils import get_with_retry
 
 RESOURCE = "3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
-BASE_URL = f"https://api.data.gov.in/resource/{RESOURCE}"
+# GitHub Actions runner IPs have been observed being refused outright (fast
+# TCP connection failure, not a slow timeout) by api.data.gov.in -- see
+# config.py's CPCB_PROXY_URL docs. When that's set, route through it instead
+# of hitting the host directly; same path and query string either way, so
+# nothing else in this file needs to change.
+_HOST = CPCB_PROXY_URL if CPCB_PROXY_URL else "https://api.data.gov.in"
+BASE_URL = f"{_HOST}/resource/{RESOURCE}"
 PAGE_SIZE = 500
 
 # CPCB's pollutant_id strings -> the names build_features.py/export_for_modeling.py use.

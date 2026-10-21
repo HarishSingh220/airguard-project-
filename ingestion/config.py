@@ -19,6 +19,16 @@ Required environment variables (set as GitHub Actions secrets; see
     CPCB_API_KEY        data.gov.in API key (Dashboard -> My Account -> API key);
                         the public sample key works for light testing but is rate
                         limited and shared by everyone, so request your own.
+
+Optional environment variables:
+    CPCB_PROXY_URL      base URL of a relay that forwards to api.data.gov.in from an
+                        IP that isn't a GitHub Actions runner (see
+                        ingestion/cpcb_proxy_worker.js for a ready-to-deploy
+                        Cloudflare Worker). If unset, fetch_cpcb.py calls
+                        api.data.gov.in directly as before. Set it to your deployed
+                        Worker's URL, e.g. https://cpcb-proxy.<you>.workers.dev
+                        (no trailing slash) -- fetch_cpcb.py appends the same
+                        /resource/<id> path and query string it always has.
 """
 import os
 
@@ -26,6 +36,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
 CDSAPI_URL = os.environ.get("CDSAPI_URL", "")
 CDSAPI_KEY = os.environ.get("CDSAPI_KEY", "")
+# Optional: see "Optional environment variables" above. Empty string means "no
+# proxy configured", which fetch_cpcb.py treats the same as not set.
+CPCB_PROXY_URL = os.environ.get("CPCB_PROXY_URL", "").rstrip("/")
 # No fallback default: a shared sample key is rate-limited and shared across every
 # user of this script, so silently falling back to it just makes failures show up
 # later and elsewhere (as rate-limit errors or skipped stations) instead of here,
