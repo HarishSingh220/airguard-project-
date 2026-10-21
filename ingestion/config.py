@@ -52,7 +52,7 @@ CPCB_API_KEY = os.environ.get("CPCB_API_KEY", "")
 STATIONS = {
     "Anand Vihar": {"lat": 28.6469, "lon": 77.3158, "cpcb_name": "Anand Vihar, Delhi - DPCC"},
     "Dwarka Sector 8": {"lat": 28.5710, "lon": 77.0710, "cpcb_name": "Dwarka-Sector 8, Delhi - DPCC"},
-    "IMD Lodhi Road": {"lat": 28.5918, "lon": 77.2273, "cpcb_name": "Lodhi Road, Delhi - IMD"},
+    "IMD Lodhi Road": {"lat": 28.5918, "lon": 77.2273, "cpcb_name": "IMD Lodhi Road, Delhi - IITM"},
     "ITO": {"lat": 28.6316, "lon": 77.2410, "cpcb_name": "ITO, Delhi - CPCB"},
     "Punjabi Bagh": {"lat": 28.6740, "lon": 77.1310, "cpcb_name": "Punjabi Bagh, Delhi - DPCC"},
 }
