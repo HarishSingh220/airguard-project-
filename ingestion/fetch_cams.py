@@ -19,6 +19,8 @@ has renamed things before), run `cdsapi` against the ADS web form's "Show API
 request" for this dataset and compare; this script isolates that request in
 one place (REQUEST, below) so fixing it means editing only this file.
 """
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,7 +45,7 @@ VAR_COLUMN = {
     "pm2p5": "cams_pm25", "pm10": "cams_pm10", "aod550": "cams_aod550",
     "tcno2": "cams_no2_col", "gtco3": "cams_o3_col_du",
 }
-DOWNLOAD_PATH = Path("/tmp/cams_forecast.nc")
+DOWNLOAD_PATH = Path("/tmp/cams_forecast.zip")
 
 
 def build_request():
@@ -51,7 +53,12 @@ def build_request():
     box = [DELHI_LAT + 0.5, DELHI_LON - 0.5, DELHI_LAT - 0.5, DELHI_LON + 0.5]  # N, W, S, E
     return {
         "variable": VARIABLES, "date": [f"{today}/{today}"], "time": ["00:00"],
-        "leadtime_hour": LEADTIME_HOURS, "type": ["forecast"], "format": "netcdf",
+        "leadtime_hour": LEADTIME_HOURS, "type": ["forecast"],
+        # This dataset's own ADS page lists its only download formats as "GRIB or
+        # zipped NetCDF" -- plain "netcdf" isn't offered at all and is exactly the
+        # "invalid combination of values" 400 this used to raise, regardless of which
+        # variables were requested. netcdf_zip is required.
+        "data_format": "netcdf_zip",
         "area": box,
     }
 
@@ -69,22 +76,49 @@ def fetch(request):
     return DOWNLOAD_PATH
 
 
-def to_dataframe(nc_path, run_time, init_time):
+def _frame_from_nc(nc_path):
+    """One .nc file -> a (valid_time, <our columns present in this file>) frame.
+    Returns None if this file has none of VAR_COLUMN's variables (e.g. a metadata-
+    only member, if ADS ever adds one) so the caller can skip it cleanly."""
     ds = xr.open_dataset(nc_path)
-    point = ds.sel(latitude=DELHI_LAT, longitude=DELHI_LON, method="nearest")
-    df = point.to_dataframe().reset_index()
-    time_col = "valid_time" if "valid_time" in df.columns else ("time" if "time" in df.columns else "forecast_time")
-    out = pd.DataFrame({"valid_time": pd.to_datetime(df[time_col], utc=True)})
-    missing = []
-    for src, col in VAR_COLUMN.items():
-        if src in df.columns:
-            out[col] = df[src]
-        else:
-            missing.append(src)
+    try:
+        point = ds.sel(latitude=DELHI_LAT, longitude=DELHI_LON, method="nearest")
+        df = point.to_dataframe().reset_index()
+        time_col = "valid_time" if "valid_time" in df.columns else ("time" if "time" in df.columns else "forecast_time")
+        frame = pd.DataFrame({"valid_time": pd.to_datetime(df[time_col], utc=True)})
+        found = [src for src in VAR_COLUMN if src in df.columns]
+        for src in found:
+            frame[VAR_COLUMN[src]] = df[src]
+        return (frame, found) if found else (None, [])
+    finally:
+        ds.close()
+
+
+def to_dataframe(zip_path, run_time, init_time):
+    with tempfile.TemporaryDirectory() as extract_dir:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+        nc_paths = sorted(Path(extract_dir).glob("*.nc"))
+        if not nc_paths:
+            raise RuntimeError(f"no .nc files found inside the downloaded {zip_path} -- "
+                                f"ADS may have changed this dataset's zip layout")
+        frames, found_overall = [], set()
+        for nc_path in nc_paths:
+            frame, found = _frame_from_nc(nc_path)
+            if frame is not None:
+                frames.append(frame)
+                found_overall.update(found)
+    missing = [src for src in VAR_COLUMN if src not in found_overall]
     if missing:
-        print(f"WARNING: expected CAMS variable(s) {missing} not found in the downloaded file. "
-              f"Columns actually present: {sorted(df.columns)}. "
+        print(f"WARNING: expected CAMS variable(s) {missing} not found in any of the "
+              f"{len(nc_paths)} file(s) inside the downloaded zip. "
               f"ADS may have renamed the short name(s) -- update VAR_COLUMN in fetch_cams.py.")
+    if not frames:
+        raise RuntimeError(f"none of VAR_COLUMN's expected variables {list(VAR_COLUMN)} were "
+                            f"found in any of the {len(nc_paths)} file(s) inside the downloaded zip")
+    out = frames[0]
+    for extra in frames[1:]:
+        out = out.merge(extra, on="valid_time", how="outer")
     out = out.groupby("valid_time", as_index=False).mean(numeric_only=True)
     out["lead_time_hours"] = ((out["valid_time"] - init_time).dt.total_seconds() / 3600).round().astype("Int64")
     # Every row here is a CAMS forecast product, full stop -- is_forecast is not derived
@@ -106,8 +140,8 @@ def main():
     init_schema(engine)
     started = datetime.now(timezone.utc)
     try:
-        nc_path = fetch(build_request())
-        df = to_dataframe(nc_path, run_time, init_time)
+        zip_path = fetch(build_request())
+        df = to_dataframe(zip_path, run_time, init_time)
         df = df.dropna(how="all", subset=list(VAR_COLUMN.values()))
         n = upsert_dataframe(engine, "cams_hourly", df, pk_cols=["valid_time", "source"])
         log_run(engine, "fetch_cams", started, datetime.now(timezone.utc), n, "ok")
@@ -116,9 +150,8 @@ def main():
         log_run(engine, "fetch_cams", started, datetime.now(timezone.utc), 0, "error", str(exc))
         raise
     finally:
-        nc_path_obj = DOWNLOAD_PATH
-        if nc_path_obj.exists():
-            nc_path_obj.unlink()
+        if DOWNLOAD_PATH.exists():
+            DOWNLOAD_PATH.unlink()
 
 
 if __name__ == "__main__":

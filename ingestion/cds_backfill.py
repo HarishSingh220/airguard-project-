@@ -41,6 +41,8 @@ Usage (run repeatedly until "all done"):
 import argparse
 import json
 import sys
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,7 +103,7 @@ def build_request(kind, lo, hi):
             # Only this day's own near-term hours, not the full 120h lead forecast --
             # for a backfill we want each day's own best estimate, not next week's forecast of it.
             "leadtime_hour": [str(h) for h in range(0, 24, 3)],
-            "type": ["forecast"], "format": "netcdf", "area": box,
+            "type": ["forecast"], "data_format": "netcdf_zip", "area": box,
         }
     raise ValueError(kind)
 
@@ -130,7 +132,8 @@ def poll_and_download(kind, client):
             continue
         status = client.client.status(job["request_id"]) if hasattr(client.client, "status") else "unknown"
         if status in ("completed", "successful"):
-            out_path = DOWNLOAD_DIR / f"{kind}_{key.replace(':', '_')}.nc"
+            ext = "zip" if kind == "cams-no2-o3" else "nc"
+            out_path = DOWNLOAD_DIR / f"{kind}_{key.replace(':', '_')}.{ext}"
             client.download(job["request_id"], str(out_path))
             job["status"] = "done"
             job["path"] = str(out_path)
@@ -186,20 +189,42 @@ def load_cams_no2_o3():
     for key, job in state.get("cams-no2-o3", {}).items():
         if job["status"] != "done" or job.get("loaded"):
             continue
-        ds = xr.open_dataset(job["path"])
-        point = ds.sel(latitude=DELHI_LAT, longitude=DELHI_LON, method="nearest")
-        df = point.to_dataframe().reset_index()
-        time_col = "valid_time" if "valid_time" in df.columns else ("time" if "time" in df.columns else "forecast_time")
-        out = pd.DataFrame({"valid_time": pd.to_datetime(df[time_col], utc=True)})
-        # "tcno2" matches total_column_nitrogen_dioxide in build_request() above --
-        # NOT "no2", which is the different multi-level variable this no longer requests.
-        if "tcno2" in df.columns:
-            out["cams_no2_col"] = df["tcno2"]
-        else:
-            print(f"WARNING: [cams-no2-o3] {key}: expected variable 'tcno2' not found. "
-                  f"Columns actually present: {sorted(df.columns)}.")
-        if "gtco3" in df.columns:
-            out["cams_o3_col_du"] = df["gtco3"]
+        # "tcno2"/"gtco3" match total_column_nitrogen_dioxide/total_column_ozone in
+        # build_request() above -- NOT "no2", which is a different multi-level variable
+        # this doesn't request. job["path"] is a zip (data_format=netcdf_zip, same as
+        # fetch_cams.py); a multi-variable request commonly splits across more than one
+        # .nc file inside it, so every .nc member is opened and merged, not just one.
+        var_column = {"tcno2": "cams_no2_col", "gtco3": "cams_o3_col_du"}
+        with tempfile.TemporaryDirectory() as extract_dir:
+            with zipfile.ZipFile(job["path"]) as zf:
+                zf.extractall(extract_dir)
+            nc_paths = sorted(Path(extract_dir).glob("*.nc"))
+            frames, found = [], set()
+            for nc_path in nc_paths:
+                ds = xr.open_dataset(nc_path)
+                try:
+                    point = ds.sel(latitude=DELHI_LAT, longitude=DELHI_LON, method="nearest")
+                    df = point.to_dataframe().reset_index()
+                    time_col = "valid_time" if "valid_time" in df.columns else ("time" if "time" in df.columns else "forecast_time")
+                    frame = pd.DataFrame({"valid_time": pd.to_datetime(df[time_col], utc=True)})
+                    here = [src for src in var_column if src in df.columns]
+                    for src in here:
+                        frame[var_column[src]] = df[src]
+                        found.add(src)
+                    if here:
+                        frames.append(frame)
+                finally:
+                    ds.close()
+        missing = [src for src in var_column if src not in found]
+        if missing:
+            print(f"WARNING: [cams-no2-o3] {key}: expected variable(s) {missing} not found "
+                  f"in any of the {len(nc_paths)} file(s) inside the downloaded zip.")
+        if not frames:
+            print(f"WARNING: [cams-no2-o3] {key}: no expected variables found at all -- skipping this chunk.")
+            continue
+        out = frames[0]
+        for extra in frames[1:]:
+            out = out.merge(extra, on="valid_time", how="outer")
         out = out.groupby("valid_time", as_index=False).mean(numeric_only=True)
         # Same product line as fetch_cams.py (cams-global-atmospheric-composition-forecasts,
         # type=forecast) -- these rows are forecast output, not observations, regardless of
