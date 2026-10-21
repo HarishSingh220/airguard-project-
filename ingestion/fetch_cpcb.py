@@ -24,18 +24,12 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 
-from config import CPCB_API_KEY, CPCB_PROXY_URL, STATIONS
+from config import CPCB_API_KEY, STATIONS
 from db import get_engine, init_schema, log_run, upsert_dataframe
 from http_utils import get_with_retry
 
 RESOURCE = "3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
-# GitHub Actions runner IPs have been observed being refused outright (fast
-# TCP connection failure, not a slow timeout) by api.data.gov.in -- see
-# config.py's CPCB_PROXY_URL docs. When that's set, route through it instead
-# of hitting the host directly; same path and query string either way, so
-# nothing else in this file needs to change.
-_HOST = CPCB_PROXY_URL if CPCB_PROXY_URL else "https://api.data.gov.in"
-BASE_URL = f"{_HOST}/resource/{RESOURCE}"
+BASE_URL = f"https://api.data.gov.in/resource/{RESOURCE}"
 PAGE_SIZE = 500
 
 # CPCB's pollutant_id strings -> the names build_features.py/export_for_modeling.py use.
@@ -56,7 +50,7 @@ def fetch_all_records(state="Delhi"):
         resp = get_with_retry(BASE_URL, params={
             "api-key": CPCB_API_KEY, "format": "json", "limit": PAGE_SIZE, "offset": offset,
             "filters[state]": state,
-        }, timeout=30)
+        }, timeout=30, max_attempts=6, backoff=5.0)
         resp.raise_for_status()
         try:
             payload = resp.json()

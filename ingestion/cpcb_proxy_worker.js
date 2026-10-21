@@ -1,31 +1,41 @@
-// cpcb_proxy_worker.js
-//
-// Minimal Cloudflare Worker that relays GET requests to api.data.gov.in from
-// Cloudflare's own IP ranges, to get around api.data.gov.in refusing
-// connections from GitHub Actions runner IPs (confirmed: fast TCP connection
-// failure, not a slow/overloaded server).
-//
-// It forwards the path and query string unchanged and passes the upstream
-// response straight through, so fetch_cpcb.py needs no changes beyond
-// pointing CPCB_PROXY_URL at wherever this Worker ends up deployed.
-//
-// DEPLOY (free tier, no credit card required):
-//   1. https://dash.cloudflare.com -> sign up / log in.
-//   2. Workers & Pages -> Create -> Create Worker.
-//   3. Give it a name (e.g. "cpcb-proxy") -> Deploy.
-//   4. Click "Edit code", replace the default script with this whole file,
-//      then "Deploy" again.
-//   5. Copy the Worker's URL (shown on its overview page, looks like
-//      https://cpcb-proxy.<your-subdomain>.workers.dev).
-//   6. In your GitHub repo: Settings -> Secrets and variables -> Actions ->
-//      New repository secret. Name: CPCB_PROXY_URL. Value: the URL from
-//      step 5 (no trailing slash).
-//   7. Make sure ingest.yml passes CPCB_PROXY_URL through to the job's env
-//      (see the snippet in that file).
-//
-// No Cloudflare account secrets are needed inside the Worker itself -- the
-// CPCB_API_KEY stays where it already is, passed as a query param by
-// fetch_cpcb.py and simply forwarded here.
+/**
+ * cpcb_proxy_worker.js
+ * A minimal Cloudflare Worker that relays requests to api.data.gov.in from the
+ * Worker's own egress IP, for use as CPCB_PROXY_URL (see config.py / fetch_cpcb.py).
+ *
+ * Why: some of data.gov.in's outages/unreachability have been specific to
+ * GitHub Actions runner IP ranges rather than a true origin outage (a GH Actions
+ * runner uses shared, well-known IP blocks that a government API's edge/WAF may
+ * rate-limit or block outright, independent of whether api.data.gov.in itself is
+ * up). Cloudflare Workers run on Cloudflare's own edge network, a different IP
+ * space, so routing through one sidesteps that specific failure mode without
+ * changing the request itself in any way fetch_cpcb.py or data.gov.in would see.
+ *
+ * What it does: forwards the path and query string unchanged to
+ * https://api.data.gov.in<path>?<query> (so fetch_cpcb.py's
+ * "/resource/<id>?api-key=...&format=json&..." arrives at data.gov.in exactly as
+ * sent) and streams the response straight back, with its status code and
+ * Content-Type preserved. Nothing is logged, cached, or modified in either
+ * direction -- this is a pass-through, not a cache or a transform.
+ *
+ * Deploy:
+ *   1. https://dash.cloudflare.com -> Workers & Pages -> Create -> Create Worker.
+ *   2. Paste this file as the Worker's code, replacing the default template.
+ *   3. Deploy. Copy the assigned *.workers.dev URL (or a custom route, if you've
+ *      set one up) -- that's your CPCB_PROXY_URL.
+ *   4. Set CPCB_PROXY_URL to that URL (no trailing slash) as a GitHub Actions
+ *      secret / environment variable alongside the other CPCB_* ones.
+ *
+ * (Equivalently via Wrangler CLI: `wrangler deploy cpcb_proxy_worker.js`, after
+ * `wrangler login` and a minimal wrangler.toml naming this file as `main`.)
+ *
+ * Note: the api-key travels in the query string the same as it always has when
+ * calling data.gov.in directly (that's how data.gov.in's API is designed) -- this
+ * Worker doesn't add a new place it's exposed, but anyone with your *.workers.dev
+ * URL could still read it off an intercepted request the same way they could
+ * against the direct URL. If that matters for your key, rotate it periodically
+ * via data.gov.in's dashboard, same as you would without a proxy in front.
+ */
 
 const UPSTREAM = "https://api.data.gov.in";
 
@@ -38,22 +48,27 @@ export default {
     const incoming = new URL(request.url);
     const upstreamUrl = new URL(incoming.pathname + incoming.search, UPSTREAM);
 
-    const upstreamResponse = await fetch(upstreamUrl.toString(), {
-      method: "GET",
-      headers: { "Accept": "application/json" },
-    });
-
-    // Pass the upstream body and status straight through. Strip
-    // hop-by-hop / encoding headers that don't make sense to replay verbatim
-    // from a second hop; let the Worker runtime set fresh ones.
-    const headers = new Headers(upstreamResponse.headers);
-    headers.delete("content-encoding");
-    headers.delete("content-length");
-    headers.delete("transfer-encoding");
+    let upstreamResponse;
+    try {
+      upstreamResponse = await fetch(upstreamUrl.toString(), {
+        method: "GET",
+        headers: { "Accept": "application/json" },
+        // get_with_retry() on the fetch_cpcb.py side already retries; this
+        // Worker makes exactly one attempt per request it receives so retry
+        // policy stays in one place instead of compounding across two layers.
+      });
+    } catch (err) {
+      // A transport-level failure reaching api.data.gov.in from the Worker --
+      // surfaced as a 502 so fetch_cpcb.py's get_with_retry() (which retries
+      // 502/503/504/520-524) treats it exactly like it would a direct failure.
+      return new Response(`cpcb_proxy_worker: upstream fetch failed: ${err}`, { status: 502 });
+    }
 
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
-      headers,
+      headers: {
+        "Content-Type": upstreamResponse.headers.get("Content-Type") || "application/json",
+      },
     });
   },
 };
