@@ -124,7 +124,7 @@ def _quote_ident(name):
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def upsert_dataframe(engine, table, df, pk_cols, batch_size=5000):
+def upsert_dataframe(engine, table, df, pk_cols, batch_size=1000):
     """Insert df into `table`, updating any row whose primary key already exists
     (an "upsert"). Uses a temp table plus INSERT ... ON CONFLICT, the standard
     pattern for pandas + Postgres since pandas.to_sql has no native upsert.

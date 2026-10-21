@@ -64,6 +64,7 @@ def migrate_era5_surface(engine):
     df = load_csv("era5_surface_hourly_ist.csv", ["timestamp"], tz_cols=["timestamp"])
     if df is None:
         return
+    df = df.drop(columns=["era5_inv_strength"], errors="ignore")
     n = upsert_dataframe(engine, "era5_surface_hist", df, pk_cols=["timestamp"])
     print(f"era5_surface_hist: {n} rows")
 
