@@ -29,6 +29,18 @@ jobs:
           key: ${{ secrets.CDSAPI_KEY }}
           EOF
 
+      - name: Diagnose api.data.gov.in connectivity
+        # Informational only -- never fails the job. Helps tell apart a DNS problem,
+        # a routing/firewall drop (connect just hangs, no TCP handshake), and a slow
+        # TLS handshake, ahead of whatever fetch_cpcb.py itself reports.
+        continue-on-error: true
+        run: |
+          echo "--- DNS resolution ---"
+          getent hosts api.data.gov.in || true
+          echo "--- TCP connect timing (10s cap) ---"
+          curl -sv --connect-timeout 10 -o /dev/null https://api.data.gov.in/ 2>&1 | \
+            grep -E "Trying|Connected|timed out|Failed" || true
+
       - name: Run all fetchers
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
