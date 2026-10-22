@@ -1,0 +1,60 @@
+name: Ingest CPCB (frequent)
+
+# CPCB's API only ever returns each station's CURRENT reading -- there is no
+# history/backfill endpoint, so a run that fails or is skipped loses that
+# window's reading for good (see fetch_cpcb.py's module docstring). CPCB's own
+# feed refreshes every 15-60 minutes, so running this only on the main 3-hourly
+# ingest.yml schedule already under-samples it even when nothing fails. This
+# workflow runs fetch_cpcb.py alone, much more often, so the normal case
+# captures more of CPCB's own update cadence and a single missed/failed
+# attempt is very likely caught by the next one 15 minutes later -- usually
+# before CPCB's own next update would have overwritten the reading anyway.
+#
+# Safe to run this independently of (and more often than) ingest.yml's combined
+# run: cpcb_hourly is upserted keyed on (station, pollutant, observed_at,
+# source) -- CPCB's own reported timestamp for the reading, not our fetch
+# time -- so overlapping or redundant polls never create duplicate rows, only
+# ever fill in observed_at values the other schedule would have missed.
+#
+# This does NOT eliminate the possibility of a gap: if data.gov.in is down for
+# longer than this interval, or CPCB updates a station's reading and then
+# updates it again before any poll catches the one in between, that reading is
+# still lost -- there's no backfill possible after the fact for this API. This
+# only shrinks how often and how large that gap can be.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes, UTC
+  workflow_dispatch: {}      # lets you trigger a run manually from the Actions tab
+
+# If a scheduled trigger is ever delayed (GitHub Actions does not guarantee
+# exact cron timing, especially under load) and a previous run is still
+# retrying CPCB_API_KEY's backoff budget (up to ~5 minutes, see fetch_cpcb.py),
+# avoid starting an overlapping run against the same key/proxy.
+concurrency:
+  group: ingest-cpcb
+  cancel-in-progress: false
+
+jobs:
+  ingest-cpcb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ingestion
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch CPCB
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CPCB_API_KEY: ${{ secrets.CPCB_API_KEY }}
+          CPCB_PROXY_URL: ${{ secrets.CPCB_PROXY_URL }}
+        run: python fetch_cpcb.py

@@ -10,9 +10,12 @@ Resource: "Real time Air Quality Index from various locations"
 This is CPCB's own live feed (refreshed roughly every 15-60 minutes), republished
 through the government's open-data API, which is documented and stable, unlike
 the CAAQM dashboard's internal endpoints. Each call returns the latest reading
-per station and pollutant; it is not a time series, so this script is meant to
-run every run of the GitHub Actions schedule (every 1-3 hours) and accumulate
-history in cpcb_hourly itself.
+per station and pollutant; it is not a time series and there is no history/
+backfill endpoint, so a missed poll is a permanent gap for that window -- this
+script runs on its own, separate, much more frequent schedule
+(.github/workflows/ingest_cpcb.yml, every 15 minutes) rather than alongside
+run_all.py's 3-hourly one, precisely to keep that gap small. See
+ingest_cpcb.yml's header comment for the full reasoning.
 
 If a station in config.STATIONS does not appear in the response, the exact name
 CPCB uses may have changed; run this file directly to print the station names
@@ -20,6 +23,12 @@ seen and fix config.STATIONS.cpcb_name.
 
 If config.CPCB_PROXY_URL is set, requests go through that relay instead of
 straight to api.data.gov.in -- see cpcb_proxy_worker.js and config.py's docstring.
+The proxy only helps with GitHub-Actions-IP-specific blocking; a 5xx/52x that
+comes back identically through the proxy (the Worker just relays whatever
+api.data.gov.in's own edge returns) means data.gov.in itself is down for
+everyone right now, which no amount of retrying or proxying can route around
+-- at that point the 15-minute schedule (not a longer retry budget within a
+single run) is what limits the resulting gap.
 """
 import sys
 from datetime import datetime, timezone
@@ -68,7 +77,7 @@ def fetch_all_records(state="Delhi"):
         resp = get_with_retry(url, params={
             "api-key": CPCB_API_KEY, "format": "json", "limit": PAGE_SIZE, "offset": offset,
             "filters[state]": state,
-        }, timeout=30, max_attempts=6, backoff=5.0)
+        }, timeout=30, max_attempts=8, backoff=10.0)
         resp.raise_for_status()
         try:
             payload = resp.json()
