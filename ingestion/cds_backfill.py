@@ -194,15 +194,18 @@ def load_cams_no2_o3():
             continue
         # "tcno2"/"gtco3" match total_column_nitrogen_dioxide/total_column_ozone in
         # build_request() above -- NOT "no2", which is a different multi-level variable
-        # this doesn't request. job["path"] is a zip (data_format=netcdf +
-        # download_format=zip, same as fetch_cams.py); a multi-variable request
-        # commonly splits across more than one .nc file inside it, so every .nc
-        # member is opened and merged, not just one.
+        # this doesn't request. download_format=zip is a request, not a guarantee: ADS
+        # only actually zips when the result can't be one coherent file, and hands back
+        # a plain .nc directly otherwise (same as fetch_cams.py -- see its to_dataframe()),
+        # so check what job["path"] actually is instead of assuming it's always a zip.
         var_column = {"tcno2": "cams_no2_col", "gtco3": "cams_o3_col_du"}
         with tempfile.TemporaryDirectory() as extract_dir:
-            with zipfile.ZipFile(job["path"]) as zf:
-                zf.extractall(extract_dir)
-            nc_paths = sorted(Path(extract_dir).glob("*.nc"))
+            if zipfile.is_zipfile(job["path"]):
+                with zipfile.ZipFile(job["path"]) as zf:
+                    zf.extractall(extract_dir)
+                nc_paths = sorted(Path(extract_dir).glob("*.nc"))
+            else:
+                nc_paths = [job["path"]]
             frames, found = [], set()
             for nc_path in nc_paths:
                 ds = xr.open_dataset(nc_path)
@@ -219,10 +222,11 @@ def load_cams_no2_o3():
                         frames.append(frame)
                 finally:
                     ds.close()
+        where = f"the {len(nc_paths)} file(s) inside the downloaded zip" if len(nc_paths) > 1 \
+            else "the downloaded file"
         missing = [src for src in var_column if src not in found]
         if missing:
-            print(f"WARNING: [cams-no2-o3] {key}: expected variable(s) {missing} not found "
-                  f"in any of the {len(nc_paths)} file(s) inside the downloaded zip.")
+            print(f"WARNING: [cams-no2-o3] {key}: expected variable(s) {missing} not found in {where}.")
         if not frames:
             print(f"WARNING: [cams-no2-o3] {key}: no expected variables found at all -- skipping this chunk.")
             continue

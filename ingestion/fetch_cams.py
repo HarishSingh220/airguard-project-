@@ -45,6 +45,9 @@ VAR_COLUMN = {
     "pm2p5": "cams_pm25", "pm10": "cams_pm10", "aod550": "cams_aod550",
     "tcno2": "cams_no2_col", "gtco3": "cams_o3_col_du",
 }
+# Despite the name/extension, what lands here may be an actual zip or a plain
+# .nc file -- see to_dataframe()'s zipfile.is_zipfile() check. The extension is
+# just a local scratch filename; neither zipfile nor xarray care what it's called.
 DOWNLOAD_PATH = Path("/tmp/cams_forecast.zip")
 
 
@@ -99,28 +102,36 @@ def _frame_from_nc(nc_path):
         ds.close()
 
 
-def to_dataframe(zip_path, run_time, init_time):
+def to_dataframe(download_path, run_time, init_time):
+    # download_format=zip in build_request() is a request, not a guarantee: ADS
+    # only actually zips when the result can't be one coherent file, and hands
+    # back a plain .nc directly otherwise (observed both ways across runs) --
+    # so check what we actually got rather than assuming either shape.
     with tempfile.TemporaryDirectory() as extract_dir:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(extract_dir)
-        nc_paths = sorted(Path(extract_dir).glob("*.nc"))
-        if not nc_paths:
-            raise RuntimeError(f"no .nc files found inside the downloaded {zip_path} -- "
-                                f"ADS may have changed this dataset's zip layout")
+        if zipfile.is_zipfile(download_path):
+            with zipfile.ZipFile(download_path) as zf:
+                zf.extractall(extract_dir)
+            nc_paths = sorted(Path(extract_dir).glob("*.nc"))
+            if not nc_paths:
+                raise RuntimeError(f"no .nc files found inside the downloaded zip {download_path} -- "
+                                    f"ADS may have changed this dataset's zip layout")
+        else:
+            nc_paths = [download_path]
         frames, found_overall = [], set()
         for nc_path in nc_paths:
             frame, found = _frame_from_nc(nc_path)
             if frame is not None:
                 frames.append(frame)
                 found_overall.update(found)
+    where = f"the {len(nc_paths)} file(s) inside the downloaded zip" if len(nc_paths) > 1 \
+        else "the downloaded file"
     missing = [src for src in VAR_COLUMN if src not in found_overall]
     if missing:
-        print(f"WARNING: expected CAMS variable(s) {missing} not found in any of the "
-              f"{len(nc_paths)} file(s) inside the downloaded zip. "
+        print(f"WARNING: expected CAMS variable(s) {missing} not found in {where}. "
               f"ADS may have renamed the short name(s) -- update VAR_COLUMN in fetch_cams.py.")
     if not frames:
-        raise RuntimeError(f"none of VAR_COLUMN's expected variables {list(VAR_COLUMN)} were "
-                            f"found in any of the {len(nc_paths)} file(s) inside the downloaded zip")
+        raise RuntimeError(f"none of VAR_COLUMN's expected variables {list(VAR_COLUMN)} "
+                            f"were found in {where}")
     out = frames[0]
     for extra in frames[1:]:
         out = out.merge(extra, on="valid_time", how="outer")
@@ -145,8 +156,8 @@ def main():
     init_schema(engine)
     started = datetime.now(timezone.utc)
     try:
-        zip_path = fetch(build_request())
-        df = to_dataframe(zip_path, run_time, init_time)
+        download_path = fetch(build_request())
+        df = to_dataframe(download_path, run_time, init_time)
         df = df.dropna(how="all", subset=list(VAR_COLUMN.values()))
         n = upsert_dataframe(engine, "cams_hourly", df, pk_cols=["valid_time", "source"])
         log_run(engine, "fetch_cams", started, datetime.now(timezone.utc), n, "ok")

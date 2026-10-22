@@ -19,6 +19,7 @@ era5_lapse_925_700, era5_ventilation, u10/v10/u925/v925), with the formulas
 documented there, because the original CSVs' own builder was not available
 here to copy from directly.
 """
+import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -39,7 +40,11 @@ SURFACE_RENAME = {"surface_pressure": "surface_pressure_hpa"}
 PRESSURE_VARS = ["temperature", "wind_speed", "wind_direction", "relative_humidity", "geopotential_height"]
 
 
-def fetch():
+BODY_RETRY_ATTEMPTS = 3
+BODY_RETRY_BACKOFF = 5.0  # seconds; attempt N sleeps BODY_RETRY_BACKOFF * N before retrying
+
+
+def _fetch_once():
     # timezone=Asia/Kolkata (not UTC): the historical data, build_features.py
     # and the now-IST-floored CPCB live rows are all on an IST-hourly grid
     # (00:00, 01:00, ... IST). Requesting UTC here would return a grid offset
@@ -68,6 +73,28 @@ def fetch():
     if bad:
         raise RuntimeError(f"Open-Meteo returned unexpected wind-speed units: {bad}")
     return body["hourly"]
+
+
+def fetch():
+    """_fetch_once(), retried a few times. Open-Meteo has been observed returning
+    HTTP 200 (so get_with_retry's status-code retry never triggers -- the response
+    "succeeded" as far as the transport layer is concerned) with a body that died
+    mid-stream on its own backend, e.g. 'Unexpected error while streaming data:
+    timeoutReached' instead of JSON. That's its own backend timing out while
+    assembling this wide a query (8 surface vars + 5 vars x 6 pressure levels),
+    not something retrying the exact same bytes would fix -- a fresh request is
+    what gets a fresh attempt at assembling the response in time."""
+    last_exc = None
+    for attempt in range(1, BODY_RETRY_ATTEMPTS + 1):
+        try:
+            return _fetch_once()
+        except RuntimeError as exc:
+            last_exc = exc
+            if attempt == BODY_RETRY_ATTEMPTS:
+                raise
+            print(f"fetch_openmeteo: attempt {attempt}/{BODY_RETRY_ATTEMPTS} got a bad body ({exc}); retrying")
+            time.sleep(BODY_RETRY_BACKOFF * attempt)
+    raise last_exc  # pragma: no cover -- loop above always returns or raises first
 
 
 def _parse_ist_grid(time_strings):

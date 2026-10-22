@@ -11,7 +11,9 @@ fetch_*.py script is responsible for actually raising when it has nothing
 usable to report (see fetch_firms.py's all-sources-failed case) rather than
 swallowing a total failure into a status string nothing else reads.
 """
+import os
 import sys
+import time
 import traceback
 
 import fetch_cams
@@ -23,16 +25,40 @@ JOBS = [("cpcb", fetch_cpcb.main), ("firms", fetch_firms.main),
        ("openmeteo", fetch_openmeteo.main), ("cams", fetch_cams.main)]
 
 
+def _write_step_summary(results):
+    """results: [(name, ok, duration_seconds), ...]. Writes a per-job markdown
+    table to $GITHUB_STEP_SUMMARY, which GitHub Actions renders directly on the
+    run's summary page -- so "cpcb/firms actually landed rows even though this
+    run shows red overall" is visible at a glance instead of only in the raw
+    log. GITHUB_STEP_SUMMARY is unset outside Actions (local runs, tests), in
+    which case this is a silent no-op; it never affects run_all.py's own exit
+    code, which should keep reflecting a real failure as a real failure."""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = ["## Ingestion results", "", "| Job | Status | Duration |", "| --- | --- | --- |"]
+    for name, ok, duration in results:
+        status = "✅ ok" if ok else "❌ FAILED"
+        lines.append(f"| {name} | {status} | {duration:.0f}s |")
+    with open(summary_path, "a") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main():
     failures = []
+    results = []
     for name, fn in JOBS:
         print(f"\n=== {name} ===")
+        started = time.monotonic()
         try:
             fn()
+            results.append((name, True, time.monotonic() - started))
         except Exception:
             print(f"FAILED: {name}")
             traceback.print_exc()
             failures.append(name)
+            results.append((name, False, time.monotonic() - started))
+    _write_step_summary(results)
     if failures:
         print(f"\n{len(failures)} of {len(JOBS)} jobs failed: {failures}")
         sys.exit(1)
