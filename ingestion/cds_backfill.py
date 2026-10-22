@@ -103,7 +103,10 @@ def build_request(kind, lo, hi):
             # Only this day's own near-term hours, not the full 120h lead forecast --
             # for a backfill we want each day's own best estimate, not next week's forecast of it.
             "leadtime_hour": [str(h) for h in range(0, 24, 3)],
-            "type": ["forecast"], "data_format": "netcdf_zip", "area": box,
+            # See fetch_cams.py's build_request() for why this needs both keys
+            # (data_format=netcdf alone, or the old single "netcdf_zip" value, both
+            # 400 here) -- same dataset, same fix.
+            "type": ["forecast"], "data_format": "netcdf", "download_format": "zip", "area": box,
         }
     raise ValueError(kind)
 
@@ -191,9 +194,10 @@ def load_cams_no2_o3():
             continue
         # "tcno2"/"gtco3" match total_column_nitrogen_dioxide/total_column_ozone in
         # build_request() above -- NOT "no2", which is a different multi-level variable
-        # this doesn't request. job["path"] is a zip (data_format=netcdf_zip, same as
-        # fetch_cams.py); a multi-variable request commonly splits across more than one
-        # .nc file inside it, so every .nc member is opened and merged, not just one.
+        # this doesn't request. job["path"] is a zip (data_format=netcdf +
+        # download_format=zip, same as fetch_cams.py); a multi-variable request
+        # commonly splits across more than one .nc file inside it, so every .nc
+        # member is opened and merged, not just one.
         var_column = {"tcno2": "cams_no2_col", "gtco3": "cams_o3_col_du"}
         with tempfile.TemporaryDirectory() as extract_dir:
             with zipfile.ZipFile(job["path"]) as zf:

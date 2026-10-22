@@ -54,11 +54,16 @@ def build_request():
     return {
         "variable": VARIABLES, "date": [f"{today}/{today}"], "time": ["00:00"],
         "leadtime_hour": LEADTIME_HOURS, "type": ["forecast"],
-        # This dataset's own ADS page lists its only download formats as "GRIB or
-        # zipped NetCDF" -- plain "netcdf" isn't offered at all and is exactly the
-        # "invalid combination of values" 400 this used to raise, regardless of which
-        # variables were requested. netcdf_zip is required.
-        "data_format": "netcdf_zip",
+        # The current ADS API has two separate keys where the old API had one
+        # combined "format" value: data_format ("netcdf"/"grib") and download_format
+        # ("zip"/"unarchived"). "netcdf_zip" isn't a valid data_format -- the client
+        # silently drops it back to plain "netcdf", which is indistinguishable from
+        # never asking for zipping at all and is exactly what kept 400ing. This
+        # request's variables don't share one GRIB stepType/levtype (surface fields
+        # like PM2.5 vs column fields like total_column_ozone), so the server can't
+        # flatten them into a single NetCDF; download_format=zip is what tells it
+        # that's fine and to hand back one .nc per group inside a zip instead.
+        "data_format": "netcdf", "download_format": "zip",
         "area": box,
     }
 
