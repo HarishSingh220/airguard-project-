@@ -7,7 +7,7 @@ primary-key columns.
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from config import DATABASE_URL
@@ -166,7 +166,25 @@ def upsert_dataframe(engine, table, df, pk_cols, batch_size=1000):
         with engine.begin() as conn:
             conn.execute(text(f'DROP TABLE IF EXISTS {q_tmp}'))
             conn.execute(text(f'CREATE TEMP TABLE {q_tmp} (LIKE {q_table} INCLUDING DEFAULTS)'))
-            df.to_sql(tmp, conn, if_exists="append", index=False, chunksize=batch_size, method="multi")
+            # Pandas infers bind types from the DataFrame. A column containing
+            # only None values becomes VARCHAR even when the destination column
+            # is numeric (for example, FIRMS brightness can be absent for an
+            # entire satellite batch). Bind using the real table's schema so
+            # nullable values are still sent with the correct PostgreSQL type.
+            column_types = {
+                column["name"]: column["type"]
+                for column in inspect(conn).get_columns(table)
+                if column["name"] in df.columns
+            }
+            df.to_sql(
+                tmp,
+                conn,
+                if_exists="append",
+                index=False,
+                chunksize=batch_size,
+                method="multi",
+                dtype=column_types,
+            )
             col_list = ", ".join(q_cols)
             pk_list = ", ".join(q_pk)
             upsert_sql = f'INSERT INTO {q_table} ({col_list}) SELECT {col_list} FROM {q_tmp} ' \
