@@ -1,22 +1,16 @@
 /**
  * cpcb_proxy_worker.js
- * A minimal Cloudflare Worker that relays requests to api.data.gov.in from the
- * Worker's own egress IP, for use as CPCB_PROXY_URL (see config.py / fetch_cpcb.py).
+ * A minimal Cloudflare Worker that relays the project's CPCB snapshot and
+ * historical-report requests from the Worker's own egress IP.
  *
- * Why: some of data.gov.in's outages/unreachability have been specific to
- * GitHub Actions runner IP ranges rather than a true origin outage (a GH Actions
- * runner uses shared, well-known IP blocks that a government API's edge/WAF may
- * rate-limit or block outright, independent of whether api.data.gov.in itself is
- * up). Cloudflare Workers run on Cloudflare's own edge network, a different IP
- * space, so routing through one sidesteps that specific failure mode without
- * changing the request itself in any way fetch_cpcb.py or data.gov.in would see.
+ * Why: CPCB's hosts may block or fail to route GitHub Actions runner IP ranges.
+ * Cloudflare Workers use a different egress network, so relaying these requests
+ * can avoid runner-specific connectivity failures.
  *
- * What it does: forwards the path and query string unchanged to
- * https://api.data.gov.in<path>?<query> (so fetch_cpcb.py's
- * "/resource/<id>?api-key=...&format=json&..." arrives at data.gov.in exactly as
- * sent) and streams the response straight back, with its status code and
- * Content-Type preserved. Nothing is logged, cached, or modified in either
- * direction -- this is a pass-through, not a cache or a transform.
+ * It only allows GET /resource/* to api.data.gov.in and POST
+ * /cpcb-common-report/api/excel/export to airquality.cpcb.gov.in. Each request
+ * is forwarded with its method, query, headers, and body intact. Everything
+ * else is rejected, so this does not act as an open proxy.
  *
  * Deploy:
  *   1. https://dash.cloudflare.com -> Workers & Pages -> Create -> Create Worker.
@@ -37,30 +31,29 @@
  * via data.gov.in's dashboard, same as you would without a proxy in front.
  */
 
-const UPSTREAM = "https://api.data.gov.in";
+const SNAPSHOT_UPSTREAM = "https://api.data.gov.in";
+const REPORT_UPSTREAM = "https://airquality.cpcb.gov.in";
 
 export default {
   async fetch(request) {
-    if (request.method !== "GET") {
-      return new Response("Only GET is relayed", { status: 405 });
-    }
-
     const incoming = new URL(request.url);
-    const upstreamUrl = new URL(incoming.pathname + incoming.search, UPSTREAM);
+    let upstream;
+    if (request.method === "GET" && incoming.pathname.startsWith("/resource/")) {
+      upstream = SNAPSHOT_UPSTREAM;
+    } else if (request.method === "POST" &&
+               incoming.pathname === "/cpcb-common-report/api/excel/export") {
+      upstream = REPORT_UPSTREAM;
+    } else {
+      return new Response("Route or method is not allowed", { status: 405 });
+    }
+    const upstreamUrl = new URL(incoming.pathname + incoming.search, upstream);
 
     let upstreamResponse;
     try {
-      upstreamResponse = await fetch(upstreamUrl.toString(), {
-        method: "GET",
-        headers: { "Accept": "application/json" },
-        // get_with_retry() on the fetch_cpcb.py side already retries; this
-        // Worker makes exactly one attempt per request it receives so retry
-        // policy stays in one place instead of compounding across two layers.
-      });
+      upstreamResponse = await fetch(new Request(upstreamUrl.toString(), request));
     } catch (err) {
-      // A transport-level failure reaching api.data.gov.in from the Worker --
-      // surfaced as a 502 so fetch_cpcb.py's get_with_retry() (which retries
-      // 502/503/504/520-524) treats it exactly like it would a direct failure.
+      // Surface a transport-level upstream failure as a 502. The caller keeps
+      // its retry policy and logs the specific failure.
       return new Response(`cpcb_proxy_worker: upstream fetch failed: ${err}`, { status: 502 });
     }
 

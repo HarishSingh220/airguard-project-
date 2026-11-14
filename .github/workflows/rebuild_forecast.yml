@@ -13,6 +13,7 @@ on:
       - "ingestion/config.py"
       - "ingestion/export_for_modeling.py"
       - "ingestion/fetch_cpcb_recent.py"
+      - "ingestion/cpcb_proxy_worker.js"
 
 permissions:
   contents: write
@@ -48,6 +49,7 @@ jobs:
       - name: Backfill recent hourly CPCB station history
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CPCB_PROXY_URL: ${{ secrets.CPCB_PROXY_URL }}
         run: python ingestion/fetch_cpcb_recent.py
 
       - name: Export current historical and live data

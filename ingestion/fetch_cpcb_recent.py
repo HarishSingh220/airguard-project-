@@ -17,10 +17,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
-from config import STATIONS
+from config import CPCB_PROXY_URL, STATIONS
 from db import get_engine, init_schema, log_run, upsert_dataframe
 
 REPORT_URL = "https://airquality.cpcb.gov.in/cpcb-common-report/api/excel/export"
+REPORT_PROXY_PATH = "/cpcb-common-report/api/excel/export"
 SOURCE = "cpcb-report"
 HISTORY_DAYS = 44  # date delta; includes 45 calendar days counting today
 IST = ZoneInfo("Asia/Kolkata")
@@ -161,8 +162,12 @@ def _request_station_report(session, station, report_id, report_name, start, end
         "templateId": "get-real-time-report-excel",
         "callIdArguments": "stationId,fromDate,toDate,avgPeriod,parameters",
     }
+    # GitHub-hosted runners cannot connect directly to CPCB's report host.
+    # The project's Cloudflare relay can forward this allow-listed POST route
+    # after deploying the updated cpcb_proxy_worker.js.
+    url = f"{CPCB_PROXY_URL}{REPORT_PROXY_PATH}" if CPCB_PROXY_URL else REPORT_URL
     response = session.post(
-        REPORT_URL,
+        url,
         json=payload,
         headers={
             "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
