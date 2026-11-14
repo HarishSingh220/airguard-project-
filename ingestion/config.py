@@ -59,11 +59,16 @@ CPCB_API_KEY = os.environ.get("CPCB_API_KEY", "")
 # by the CPCB dashboard/API (edit STATION_CPCB_NAME if your station list differs
 # from what final_delhi_dataset.csv already uses).
 STATIONS = {
-    "Anand Vihar": {"lat": 28.6469, "lon": 77.3158, "cpcb_name": "Anand Vihar, Delhi - DPCC"},
-    "Dwarka Sector 8": {"lat": 28.5710, "lon": 77.0710, "cpcb_name": "Dwarka-Sector 8, Delhi - DPCC"},
-    "IMD Lodhi Road": {"lat": 28.5918, "lon": 77.2273, "cpcb_name": "IMD Lodhi Road, Delhi - IITM"},
-    "ITO": {"lat": 28.6316, "lon": 77.2410, "cpcb_name": "ITO, Delhi - CPCB"},
-    "Punjabi Bagh": {"lat": 28.6740, "lon": 77.1310, "cpcb_name": "Punjabi Bagh, Delhi - DPCC"},
+    "Anand Vihar": {"lat": 28.6469, "lon": 77.3158, "cpcb_name": "Anand Vihar, Delhi - DPCC",
+                    "cpcb_report_id": "site_301", "cpcb_report_name": "Anand Vihar, Delhi - DPCC"},
+    "Dwarka Sector 8": {"lat": 28.5710, "lon": 77.0710, "cpcb_name": "Dwarka-Sector 8, Delhi - DPCC",
+                        "cpcb_report_id": "site_1422", "cpcb_report_name": "Dwarka-Sector 8, Delhi - DPCC "},
+    "IMD Lodhi Road": {"lat": 28.5918, "lon": 77.2273, "cpcb_name": "IMD Lodhi Road, Delhi - IITM",
+                       "cpcb_report_id": "site_109", "cpcb_report_name": "Lodhi Road, Delhi - IMD"},
+    "ITO": {"lat": 28.6316, "lon": 77.2410, "cpcb_name": "ITO, Delhi - CPCB",
+            "cpcb_report_id": "site_117", "cpcb_report_name": "ITO, Delhi - CPCB"},
+    "Punjabi Bagh": {"lat": 28.6740, "lon": 77.1310, "cpcb_name": "Punjabi Bagh, Delhi - DPCC",
+                     "cpcb_report_id": "site_125", "cpcb_report_name": "Punjabi Bagh, Delhi - DPCC"},
 }
 # Station names on the CPCB dashboard change occasionally (an "-DPCC"/"-CPCB"
 # suffix, a monitor being renamed). If fetch_cpcb.py reports 0 rows for a

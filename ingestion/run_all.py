@@ -5,12 +5,11 @@ Runs three fetchers in sequence: firms, openmeteo, cams. One source failing
 raised together at the end so the GitHub Actions run is still marked failed
 and visible, but partial data for the run is not lost.
 
-CPCB is deliberately NOT run here -- it lives solely in the separate, much
-more frequent ingest_cpcb.yml workflow (every 15 minutes, vs this file's
-3-hourly schedule). Unlike the other three, CPCB's API has no history/backfill
-endpoint -- it only ever returns each station's CURRENT reading -- so a missed
-or infrequent poll is a permanent, unrecoverable gap for that window, which
-the other three self-heal from on their own rolling windows. Running it here
+CPCB's data.gov.in snapshot poll is deliberately NOT run here -- it lives in
+the separate, much more frequent ingest_cpcb.yml workflow (every 15 minutes,
+vs this file's 3-hourly schedule). That endpoint only returns each station's
+current reading; the daily forecast workflow separately retrieves CPCB's
+recent report history to cover missed samples. Running the snapshot poll here
 too would just double-spend CPCB_API_KEY's quota for no benefit the frequent
 workflow doesn't already cover better, and would reintroduce the risk of its
 retry budget eating into this run's share of ingest.yml's 20-minute timeout.

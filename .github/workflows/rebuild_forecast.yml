@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "0 1 * * *" # 06:30 IST
   workflow_dispatch: {}
+  # Run the data repair and forecast rebuild when its inputs change. The path
+  # filter excludes the workflow's own generated forecast commits.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/rebuild_forecast.yml"
+      - "ingestion/config.py"
+      - "ingestion/export_for_modeling.py"
+      - "ingestion/fetch_cpcb_recent.py"
 
 permissions:
   contents: write
@@ -35,6 +44,11 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python ingestion/validate_database.py
+
+      - name: Backfill recent hourly CPCB station history
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python ingestion/fetch_cpcb_recent.py
 
       - name: Export current historical and live data
         env:

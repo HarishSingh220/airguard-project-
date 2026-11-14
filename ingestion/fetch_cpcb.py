@@ -8,11 +8,11 @@ Resource: "Real time Air Quality Index from various locations"
     https://api.data.gov.in/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69
 
 This is CPCB's own live feed (refreshed roughly every 15-60 minutes), republished
-through the government's open-data API, which is documented and stable, unlike
-the CAAQM dashboard's internal endpoints. Each call returns the latest reading
-per station and pollutant; it is not a time series and there is no history/
-backfill endpoint, so a missed poll is a permanent gap for that window -- this
-script runs on its own, separate, much more frequent schedule
+through the government's open-data API. Each call returns the latest reading
+per station and pollutant; it is not a time series. The daily forecast workflow
+also uses CPCB's separate recent report export to backfill a rolling history
+window (see fetch_cpcb_recent.py). This frequent snapshot poll keeps the newest
+readings current between daily backfills -- this script runs on its own schedule
 (.github/workflows/ingest_cpcb.yml, every 15 minutes) rather than alongside
 run_all.py's 3-hourly one, precisely to keep that gap small. See
 ingest_cpcb.yml's header comment for the full reasoning.

@@ -1,14 +1,12 @@
 name: Ingest CPCB (frequent)
 
-# CPCB's API only ever returns each station's CURRENT reading -- there is no
-# history/backfill endpoint, so a run that fails or is skipped loses that
-# window's reading for good (see fetch_cpcb.py's module docstring). CPCB's own
-# feed refreshes every 15-60 minutes, so running this only on the main 3-hourly
-# ingest.yml schedule already under-samples it even when nothing fails. This
-# workflow runs fetch_cpcb.py alone, much more often, so the normal case
-# captures more of CPCB's own update cadence and a single missed/failed
-# attempt is very likely caught by the next one 15 minutes later -- usually
-# before CPCB's own next update would have overwritten the reading anyway.
+# The data.gov.in resource polled by fetch_cpcb.py only returns each station's
+# CURRENT reading. The daily forecast workflow uses CPCB's separate report
+# export for a rolling recent-history backfill; this frequent workflow still
+# captures the live snapshot cadence so the newest values stay current.
+# CPCB's feed refreshes every 15-60 minutes, so running this only on the main
+# 3-hourly ingest.yml schedule already under-samples it. This workflow polls
+# every 15 minutes to reduce that loss window.
 #
 # Safe to run this independently of (and more often than) ingest.yml's combined
 # run: cpcb_hourly is upserted keyed on (station, pollutant, observed_at,
@@ -16,11 +14,8 @@ name: Ingest CPCB (frequent)
 # time -- so overlapping or redundant polls never create duplicate rows, only
 # ever fill in observed_at values the other schedule would have missed.
 #
-# This does NOT eliminate the possibility of a gap: if data.gov.in is down for
-# longer than this interval, or CPCB updates a station's reading and then
-# updates it again before any poll catches the one in between, that reading is
-# still lost -- there's no backfill possible after the fact for this API. This
-# only shrinks how often and how large that gap can be.
+# The rolling report export repairs recent missed readings before the forecast
+# rebuild; older snapshot gaps may remain outside that report window.
 
 on:
   schedule:
