@@ -24,6 +24,7 @@ import requests
 from db import get_engine, init_schema, log_run, upsert_dataframe
 from backfill_openmeteo import date_chunks
 from http_utils import get_with_retry
+from time_utils import parse_ist_grid as _parse_ist_grid
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 IST = "Asia/Kolkata"
@@ -32,11 +33,6 @@ VARS = ["temperature", "wind_speed", "wind_direction", "relative_humidity"]
 # Same 0.25-degree box as era5_pressure_levels_12h_ist.csv (verified against the
 # historical file's own distinct lat/lon pairs).
 GRID_POINTS = [(28.50, 77.00), (28.50, 77.25), (28.75, 77.00), (28.75, 77.25)]
-
-
-def _parse_ist_grid(time_strings):
-    naive = pd.to_datetime(time_strings)
-    return naive.tz_localize(IST, ambiguous="infer", nonexistent="shift_forward").tz_convert("UTC")
 
 
 def fetch_chunk(start_date, end_date):

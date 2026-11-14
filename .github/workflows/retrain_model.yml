@@ -1,89 +1,106 @@
-name: Retrain production models (30-day cycle)
+name: Retrain production models (fixed parameters, 30-day cycle)
 
-# Walk-forward style periodic retrain: refits the four ensemble members
-# (LightGBM, XGBoost, RandomForest, Ridge) on all data available as of today,
-# using the SAME tuned hyperparameters and ensemble weights every single time
-# (best_params_*.json / ensemble_weights_*.json are read, never written, by
-# this workflow -- no tuning happens here, only fitting; see
-# train_production_models.py). rebuild_forecast.yml's daily run then just
-# loads whatever this workflow last saved and predicts -- it never fits a
-# model itself.
-#
-# Runs this cheap check daily rather than on a fixed "1st of the month" cron:
-# check_retrain_due.py queries ingestion_log for the last successful retrain
-# and only lets the expensive steps below run once ~30 days have actually
-# passed. That makes the schedule robust to a missed or failed run -- it
-# retrains as soon as it notices it's overdue, instead of waiting for a fixed
-# calendar date it already missed.
-
+# This workflow only REFITS the production ensembles. It does not tune or write
+# params/*.json. The expensive search is a developer-operated local script:
+# python tune_parameters_offline.py (never run on GitHub Actions).
 on:
   schedule:
-    - cron: "30 1 * * *"      # daily, 01:30 UTC -- 30 min after rebuild_forecast.yml's
-                               # daily 01:00 UTC run, so a retrain (when due) trains on
-                               # the same day's freshly rebuilt features
+    - cron: "30 1 * * *" # Daily due-check, 30 minutes after the daily forecast rebuild.
   workflow_dispatch:
     inputs:
       force:
-        description: "Retrain now even if 30 days haven't passed yet"
+        description: "Retrain now even if the 30-day interval has not elapsed"
         type: boolean
         default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: airguard-production-repository-writes
+  cancel-in-progress: false
 
 jobs:
   retrain:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: write        # needed to commit outputs/models/ back to the repo
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            ingestion/requirements.txt
+            requirements-production.txt
 
       - name: Install ingestion dependencies
-        working-directory: ingestion
-        run: pip install -r requirements.txt
+        run: python -m pip install -r ingestion/requirements.txt
 
-      - name: Check whether a retrain is due
+      - name: Check whether retraining is due
         id: gate
         working-directory: ingestion
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FORCE_RETRAIN: ${{ github.event.inputs.force }}
+          FORCE_RETRAIN: ${{ inputs.force }}
         run: python check_retrain_due.py
 
-      - name: Install modeling dependencies
+      - name: Install production model and MLflow dependencies
         if: steps.gate.outputs.due == 'true'
-        run: pip install pandas numpy scikit-learn xgboost lightgbm joblib
+        run: python -m pip install -r requirements-production.txt
 
-      - name: Export combined historical + live data from Postgres
+      - name: Validate persistent database and historical migration
+        if: steps.gate.outputs.due == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python ingestion/validate_database.py
+
+      - name: Export current historical and live data
         if: steps.gate.outputs.due == 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python ingestion/export_for_modeling.py
 
-      - name: Regenerate fire_daily_features.csv (historical + live)
+      - name: Rebuild fire features
         if: steps.gate.outputs.due == 'true'
         run: python ingestion/rebuild_fire_daily.py
 
-      - name: Build the daily feature table
+      - name: Build feature table
         if: steps.gate.outputs.due == 'true'
         run: python build_features.py
 
-      - name: Check live-feature data quality
+      - name: Validate feature quality
         if: steps.gate.outputs.due == 'true'
         run: python ingestion/data_quality_check.py
 
-      - name: Retrain production models (fixed params + weights -- fit only, no tuning)
+      - name: Retrain using the committed fixed parameters and log to MLflow
         if: steps.gate.outputs.due == 'true'
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}   # so train_production_models.py can log completion
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MLFLOW_EXPERIMENT_NAME: AirGuard-Production-Retrain
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_REGISTRY_URI: ${{ secrets.MLFLOW_REGISTRY_URI }}
+          MLFLOW_ARTIFACT_URI: ${{ secrets.MLFLOW_ARTIFACT_URI }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION || 'auto' }}
+          MLFLOW_S3_ENDPOINT_URL: ${{ secrets.MLFLOW_S3_ENDPOINT_URL }}
+          AWS_EC2_METADATA_DISABLED: "true"
         run: python train_production_models.py
 
-      - name: Commit retrained models
+      - name: Commit retrained production models
         if: steps.gate.outputs.due == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Scheduled 30-day retrain: refit production models on latest data"
-          file_pattern: outputs/models/*
+          commit_message: "Scheduled 30-day retrain: refresh production models"
+          file_pattern: >-
+            outputs/models/**
+            outputs/final_ensemble_weights_used.json
+
+      - name: Report that retraining was not due
+        if: steps.gate.outputs.due != 'true'
+        run: echo "Production retraining is not due. Fixed parameters were not modified."

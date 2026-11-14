@@ -25,14 +25,63 @@ Outputs (written to outputs/):
     final_ensemble_weights_used.json  copy of the weights the loaded models were trained with
 """
 import json
+import math
 import warnings
 
 import joblib
+import numpy as np
 import pandas as pd
 
 import model_common as mc
 
 warnings.filterwarnings("ignore")
+
+# Written by train_production_models.py at the end of the retrain that produced
+# the .joblib pipelines this script loads -- the exact weights that version of
+# each model was blended with. Reading params/ensemble_weights_*.json instead
+# (as this script used to) risks blending saved pipelines with weights that
+# have since been re-tuned for a *different*, not-yet-trained model version.
+TRAINED_WEIGHTS_SNAPSHOT = mc.MODEL_DIR / "final_ensemble_weights_used.json"
+
+
+def load_trained_weights(target_name):
+    if not TRAINED_WEIGHTS_SNAPSHOT.exists():
+        raise FileNotFoundError(
+            f"{TRAINED_WEIGHTS_SNAPSHOT} not found -- no training-time ensemble-weight snapshot "
+            f"exists yet. Run train_production_models.py (it writes this file alongside the "
+            f".joblib pipelines) before predict_forecast.py."
+        )
+    try:
+        all_weights = json.loads(TRAINED_WEIGHTS_SNAPSHOT.read_text())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{TRAINED_WEIGHTS_SNAPSHOT} is not valid JSON: {exc}") from exc
+    if target_name not in all_weights:
+        raise KeyError(f"{TRAINED_WEIGHTS_SNAPSHOT} has no entry for target {target_name!r}.")
+    weights = all_weights[target_name]
+
+    for h in mc.HORIZONS:
+        by_h = weights.get(str(h))
+        if by_h is None:
+            raise ValueError(
+                f"{TRAINED_WEIGHTS_SNAPSHOT}[{target_name!r}] is missing weights for horizon {h}."
+            )
+        for member, w in by_h.items():
+            if not math.isfinite(w) or w < 0:
+                raise ValueError(
+                    f"{TRAINED_WEIGHTS_SNAPSHOT}[{target_name!r}][{h}][{member!r}] = {w!r} is not a "
+                    f"finite, non-negative weight."
+                )
+        total = sum(by_h.values())
+        if total <= 0:
+            raise ValueError(
+                f"{TRAINED_WEIGHTS_SNAPSHOT}[{target_name!r}][{h}] has no positive weight across "
+                f"any member -- nothing to blend."
+            )
+        # Defensive normalization: the snapshot should already sum to ~1, but
+        # re-normalize rather than trust that on faith.
+        weights[str(h)] = {m: w / total for m, w in by_h.items()}
+
+    return weights
 
 
 def load_pipeline(target_name, member, h):
@@ -57,8 +106,10 @@ def load_pipeline(target_name, member, h):
 def forecast_target(target_name):
     # params aren't needed here -- they're already baked into the saved pipelines.
     # weights are needed to combine the members' predictions the same way they were
-    # combined when the ensemble was tuned.
-    _, weights = mc.load_tuning(target_name)
+    # combined when THIS version of the models was trained -- read from the
+    # training-time snapshot, not from params/ensemble_weights_*.json, which may
+    # have been re-tuned since these particular pipelines were fit.
+    weights = load_trained_weights(target_name)
     actual_col = mc.TARGETS[target_name]["actual"]
     lower, upper = mc.TARGET_BOUNDS[target_name]
     members = sorted({m for h in weights for m, v in weights[h].items() if v > 0})
@@ -82,19 +133,37 @@ def forecast_target(target_name):
     ]
 
     band_path = mc.MODEL_DIR / target_name / "oof_band.csv"
-    if band_path.exists():
-        try:
-            band = pd.read_csv(band_path, index_col="horizon")
-        except Exception as exc:
-            print(f"WARNING: could not read {band_path} ({exc}); forecast will ship with a zero-width band.")
-            band = pd.DataFrame(columns=["q_lo", "q_hi"]).rename_axis("horizon")
-    else:
-        print(f"WARNING: no oof_band.csv for {target_name} -- forecast will ship with a zero-width band.")
-        band = pd.DataFrame(columns=["q_lo", "q_hi"]).rename_axis("horizon")
+    if not band_path.exists():
+        raise FileNotFoundError(
+            f"{band_path} not found -- no uncertainty band has been trained for {target_name!r}. "
+            f"A forecast without this would silently ship zero-width intervals instead of failing. "
+            f"Run train_production_models.py (or trigger retrain_model.yml with force=true) first."
+        )
+    try:
+        band = pd.read_csv(band_path, index_col="horizon")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read {band_path} ({exc}) -- it may be corrupted or truncated. "
+            f"Re-run train_production_models.py to regenerate it."
+        ) from exc
+
+    missing_h = [h for h in mc.HORIZONS if h not in band.index]
+    if missing_h:
+        raise ValueError(
+            f"{band_path} is missing horizon(s) {missing_h} for {target_name!r} -- "
+            f"train_production_models.py should not have published an incomplete band."
+        )
+    if not {"q_lo", "q_hi"} <= set(band.columns):
+        raise ValueError(f"{band_path} is missing the q_lo/q_hi columns.")
+    band_h = band.loc[mc.HORIZONS, ["q_lo", "q_hi"]]
+    if not np.isfinite(band_h.to_numpy(dtype=float)).all():
+        raise ValueError(
+            f"{band_path} has non-finite q_lo/q_hi value(s) for {target_name!r} at horizons "
+            f"{mc.HORIZONS} -- a forecast would otherwise ship with an undefined or zero-width "
+            f"uncertainty interval. Re-run train_production_models.py."
+        )
 
     fc = fc.merge(band, left_on="horizon", right_index=True, how="left")
-    fc["q_lo"] = fc["q_lo"].fillna(0.0)
-    fc["q_hi"] = fc["q_hi"].fillna(0.0)
     fc["lower"] = (fc["prediction"] + fc["q_lo"]).clip(lower=lower, upper=upper)
     fc["upper"] = (fc["prediction"] + fc["q_hi"]).clip(lower=lower, upper=upper)
     fc["prediction"] = fc["prediction"].clip(lower=lower, upper=upper)
@@ -128,6 +197,16 @@ def main():
         (mc.OUT_DIR / "final_ensemble_weights_used.json").write_text(json.dumps(weights_used, indent=1))
     except OSError as exc:
         raise OSError(f"Could not write forecast outputs to {mc.OUT_DIR}: {exc}") from exc
+
+    # Only now, after every real forecast output has been written successfully,
+    # remove backend/dev/generate_sample_data.py's synthetic-data marker (if
+    # present) -- /api/health treats its presence as "these are fabricated
+    # numbers", so it must not be deleted a moment before the real files that
+    # replace it are actually on disk.
+    demo_marker = mc.OUT_DIR / "demo_data_marker.json"
+    if demo_marker.exists():
+        demo_marker.unlink()
+        print(f"\nRemoved {demo_marker} -- outputs/ now holds a real forecast, not demo data.")
 
     print("\nDelhi-wide forecast:")
     print(city_df.pivot(index="forecast_date", columns="target", values="prediction").round(1))

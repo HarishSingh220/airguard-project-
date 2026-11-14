@@ -1,0 +1,10 @@
+# Runtime packages required to build features and load the committed joblib models.
+# When outputs/models/trained_at.json contains model_runtime_versions, the daily
+# workflow installs those exact versions instead of resolving these ranges.
+numpy>=1.26,<3
+pandas>=2.1,<3
+scikit-learn>=1.3,<2
+xgboost>=2.0,<4
+lightgbm>=4.0,<5
+scipy>=1.11,<2
+joblib>=1.3,<2

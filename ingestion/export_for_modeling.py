@@ -164,7 +164,8 @@ WEATHER_BACKFILL = {
 
 def export_station(engine):
     hist = q(engine, 'SELECT * FROM station_hourly_hist ORDER BY "timestamp"')
-    live_long = q(engine, "SELECT station, pollutant, value_avg, observed_at FROM cpcb_hourly ORDER BY observed_at")
+    live_long = q(engine, "SELECT station, pollutant, value_avg, observed_at FROM cpcb_hourly "
+                        "WHERE value_avg IS NOT NULL ORDER BY observed_at")
     weather = q(engine, "SELECT valid_time, temperature_2m, relative_humidity_2m, wind_speed_10m, "
                         "wind_direction_10m, shortwave_radiation, precipitation, surface_pressure_hpa, source "
                         "FROM weather_surface_hourly WHERE is_forecast = false ORDER BY valid_time")

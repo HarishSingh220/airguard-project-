@@ -40,6 +40,7 @@ Usage (run repeatedly until "all done"):
 """
 import argparse
 import json
+import os
 import sys
 import tempfile
 import zipfile
@@ -50,7 +51,7 @@ import cdsapi
 import pandas as pd
 import xarray as xr
 
-from config import DELHI_LAT, DELHI_LON
+from config import CDSAPI_KEY, CDSAPI_URL, DELHI_LAT, DELHI_LON, CAMS_BBOX
 from db import get_engine, init_schema, log_run, upsert_dataframe
 
 STATE_PATH = Path("ingestion/.cds_backfill_state.json")
@@ -96,7 +97,7 @@ def build_request(kind, lo, hi):
             "time": ["00:00", "06:00", "12:00", "18:00"],  # matches era5_pressure_levels_6h_ist.csv's own grid
         }
     if kind == "cams-no2-o3":
-        box = [DELHI_LAT + 0.5, DELHI_LON - 0.5, DELHI_LAT - 0.5, DELHI_LON + 0.5]
+        box = CAMS_BBOX
         return {
             "variable": ["total_column_nitrogen_dioxide", "total_column_ozone"],
             "date": [f"{lo}/{hi}"], "time": ["00:00"],
@@ -271,11 +272,30 @@ def main():
     # them did nothing. Only override the client's url/key when actually given, since
     # cams-no2-o3 is meant to keep using the ADS ~/.cdsapirc the rest of the ingestion
     # scripts already write.
+    # Use explicit CLI credentials first. For the ERA5 q/w job the Climate
+    # Data Store has separate credentials; the CAMS job uses the ADS pair used
+    # by the live fetcher. With neither pair set, cdsapi falls back to ~/.cdsapirc.
+    env_url = (
+        os.getenv("CDS_CLIMATE_API_URL", "").strip()
+        if args.kind == "era5-pressure-qw"
+        else CDSAPI_URL
+    )
+    env_key = (
+        os.getenv("CDS_CLIMATE_API_KEY", "").strip()
+        if args.kind == "era5-pressure-qw"
+        else CDSAPI_KEY
+    )
+    url = (args.url or env_url).strip() if (args.url or env_url) else ""
+    key = (args.key or env_key).strip() if (args.key or env_key) else ""
+    if bool(url) != bool(key):
+        raise SystemExit(
+            "Both API URL and API key must be supplied together. Use --url/--key "
+            "or set the service-specific environment variables."
+        )
+
     client_kwargs = {"wait_until_complete": False}
-    if args.url:
-        client_kwargs["url"] = args.url
-    if args.key:
-        client_kwargs["key"] = args.key
+    if url and key:
+        client_kwargs.update(url=url, key=key)
     client = cdsapi.Client(**client_kwargs)
 
     # Logged the same way the scheduled fetch_*.py scripts are, so a manual backfill

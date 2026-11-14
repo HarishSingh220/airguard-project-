@@ -18,9 +18,9 @@ schedules:
 
 Everything in this file is read-only with respect to best_params_*.json and
 ensemble_weights_*.json -- nothing here ever re-tunes a hyperparameter or
-re-fits an ensemble weight. Those files are produced once by the walk-forward
-notebook (research_retrain.yml, on its own separate schedule) and are simply
-loaded and reused by every retrain.
+re-fits an ensemble weight. Production retraining loads the committed files
+as-is. The only tuning entry point is tune_parameters_offline.py, which runs
+locally and writes reviewable previews without changing production params.
 """
 import json
 from pathlib import Path
@@ -54,9 +54,9 @@ FORECAST_HORIZON = 10
 HORIZONS = list(range(1, FORECAST_HORIZON + 1))
 RANDOM_STATE = 42
 
-# Where the tuned params / weights live (edit if you move them). "Fixed, not
-# tuned": train_production_models.py reads these every retrain and never
-# writes to them -- only research_retrain.yml's notebook run does that.
+# Where the tuned params / weights live (edit if you move them). Production
+# retraining reads these files only. tune_parameters_offline.py is a separate
+# local utility and never writes candidate files into the production params/ directory.
 PARAM_DIR = Path("params")  # falls back to repo root if params/ doesn't exist
 BEST_PARAMS_FILES = {
     "AQI": "best_params_AQI.json",
@@ -208,8 +208,8 @@ def load_tuning(target):
         params = json.loads(params_path.read_text())
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"{params_path} not found -- tuned hyperparameters for {target!r} are missing. "
-            f"Run the walk-forward notebook (research_retrain.yml) first."
+            f"{params_path} not found -- fixed production hyperparameters for {target!r} are missing. "
+            "Restore the committed params file or use tune_parameters_offline.py locally to generate separate candidates."
         ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"{params_path} is not valid JSON: {exc}") from exc
@@ -217,11 +217,35 @@ def load_tuning(target):
         weights = json.loads(weights_path.read_text())
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"{weights_path} not found -- ensemble weights for {target!r} are missing. "
-            f"Run the walk-forward notebook (research_retrain.yml) first."
+            f"{weights_path} not found -- fixed production ensemble weights for {target!r} are missing. "
+            "Restore the committed params file or use tune_parameters_offline.py locally to generate separate candidates."
         ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"{weights_path} is not valid JSON: {exc}") from exc
+
+    missing_members = set(MEMBERS_ALL) - set(params)
+    if missing_members:
+        raise ValueError(f"{params_path} is missing model member(s): {sorted(missing_members)}")
+    for member in MEMBERS_ALL:
+        member_horizons = params.get(member, {})
+        missing_horizons = {str(h) for h in HORIZONS} - set(member_horizons)
+        if missing_horizons:
+            raise ValueError(
+                f"{params_path} is missing horizons for {member}: {sorted(missing_horizons)}"
+            )
+
+    missing_weight_horizons = {str(h) for h in HORIZONS} - set(weights)
+    if missing_weight_horizons:
+        raise ValueError(f"{weights_path} is missing horizons: {sorted(missing_weight_horizons)}")
+    for horizon in HORIZONS:
+        horizon_weights = weights[str(horizon)]
+        if set(horizon_weights) - set(MEMBERS_ALL):
+            raise ValueError(f"{weights_path} has unknown model members at horizon {horizon}.")
+        values = np.asarray([horizon_weights.get(member, 0.0) for member in MEMBERS_ALL], dtype=float)
+        if not np.isfinite(values).all() or (values < 0).any() or not np.isclose(values.sum(), 1.0, atol=1e-4):
+            raise ValueError(
+                f"{weights_path} weights for horizon {horizon} must be finite, non-negative, and sum to 1."
+            )
     return params, weights
 
 
@@ -294,6 +318,36 @@ def fit_production(estimator_fn, prep_kind, target_prefix, horizons=None, actual
     return pipes
 
 
+def _align_to_pipeline(X, pipe):
+    """Reindex a prediction frame's columns onto the saved pipeline's own
+    training-time schema (sklearn's `feature_names_in_` on the fitted
+    ColumnTransformer), so a daily feature-schema change between a 30-day
+    retrain and today's forecast doesn't crash prediction:
+
+      - a feature build_features.py has newly added since this pipeline was
+        trained is simply dropped here (the pipeline was never fit on it);
+      - a feature this pipeline expects but that today's build no longer has
+        (e.g. DEAD_LIMIT dropped it, or a source went away) is passed through
+        as NaN, so the fitted step's own imputer / native missing-value
+        handling deals with it the same way it does for any other missing
+        value, instead of this script raising a column-mismatch error.
+
+    This narrows *how* a schema drift fails (predictable NaN-imputation
+    instead of a crash); it doesn't remove the need to monitor feature
+    missingness and retrain when source availability changes materially --
+    see ingestion/data_quality_check.py for that.
+    """
+    try:
+        prep = pipe.named_steps["prep"]
+        expected = list(prep.feature_names_in_)
+    except (AttributeError, KeyError):
+        return X  # older pipeline / no column metadata available -- best effort
+    missing = [c for c in expected if c not in X.columns]
+    for c in missing:
+        X[c] = float("nan")
+    return X.reindex(columns=expected)
+
+
 def predict_latest(pipes, actual_col="d_AQI"):
     if not pipes:
         raise ValueError("predict_latest() got an empty `pipes` dict -- nothing to predict with.")
@@ -306,8 +360,9 @@ def predict_latest(pipes, actual_col="d_AQI"):
         t = latest[["station", "date"]].copy()
         t["horizon"] = h
         t["forecast_date"] = t["date"] + pd.Timedelta(days=h)
+        X_h = _align_to_pipeline(make_X(h).loc[latest.index].copy(), pipe)
         try:
-            t["prediction"] = pipe.predict(make_X(h).loc[latest.index])
+            t["prediction"] = pipe.predict(X_h)
         except Exception as exc:
             raise RuntimeError(f"Prediction failed at horizon {h}: {exc}") from exc
         out.append(t)
@@ -386,6 +441,14 @@ def oof_residuals(target_name, params, weights):
         y_lookup = dict(zip(*y_oof))
         y_true = np.array([y_lookup[i] for i in common_idx])
         err = y_true - blend
-        band_rows.append({"horizon": h, "q_lo": np.quantile(err, 0.10), "q_hi": np.quantile(err, 0.90)})
+        band_rows.append({
+            "horizon": h,
+            "q_lo": np.quantile(err, 0.10),
+            "q_hi": np.quantile(err, 0.90),
+            # Added for MLflow experiment tracking (see train_production_models.py) --
+            # purely additive, callers that only read q_lo/q_hi are unaffected.
+            "mae": float(np.mean(np.abs(err))),
+            "rmse": float(np.sqrt(np.mean(err ** 2))),
+        })
     return pd.DataFrame(band_rows).set_index("horizon") if band_rows else pd.DataFrame(
         columns=["q_lo", "q_hi"]).rename_axis("horizon")

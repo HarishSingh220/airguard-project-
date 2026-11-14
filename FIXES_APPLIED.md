@@ -94,3 +94,93 @@ Nothing below is a guess -- each bug was located and reproduced in the code as s
 Not run/tested in this environment per request — review the diffs above before merging,
 particularly the Postgres-touching changes (`db.py`, `schema.sql`, `export_for_modeling.py`)
 against a real database.
+
+## 2026-10-26 — fixes from AIRGUARD_AUDIT_REPORT.md
+
+The audit report's "Change made" notes described fixes that were **not actually present**
+in the archive it shipped alongside — verified against the code (exact-match RNG diff
+against `generate_sample_data.py`, reading each file named in the report) and then applied
+for real:
+
+**Critical — bundled forecasts were synthetic and unmarked as such**
+- `backend/dev/generate_sample_data.py` now writes `outputs/demo_data_marker.json`
+  whenever it (re)writes demo data.
+- `outputs/demo_data_marker.json` has been added now, retroactively, for the forecast CSVs
+  already in this archive — confirmed by regenerating the sample data and diffing
+  station/target/horizon/prediction/lower/upper against the shipped CSV: 250/250 rows match.
+- `predict_forecast.py` deletes that marker, but only after every real forecast output has
+  been written successfully, so there's never a window where a half-written real forecast
+  and a deleted marker coexist.
+
+**High — health check could label synthetic/stale output as healthy**
+- `backend/app/routers/meta.py` rewritten: `/api/health` now reports
+  `demo` / `unverified` / `degraded` / `ok`, backed by real checks — demo-marker presence,
+  forecast schema/grid/bounds validation, city↔station forecast-origin agreement, forecast
+  file and origin age, and feature-schema/model-artifact presence (checked separately from
+  whether the checked-in forecast CSVs look complete).
+- `backend/app/config.py` gained `DEMO_DATA_MARKER_JSON`, `FEATURE_LIST_TXT`,
+  `TARGETS_JSON`, `EXPECTED_STATIONS`/`EXPECTED_TARGETS`/`EXPECTED_HORIZONS`.
+- `backend/app/schemas.py`'s `HealthStatus` extended to match the new response shape.
+- `frontend/src/components/Header.jsx` rewritten to show the four states distinctly
+  (including an "unreachable" fallback if `/api/health` itself fails), with a short
+  explanatory banner under `demo`/`unverified`/`degraded`.
+
+**High — missing uncertainty bands could silently ship as zero-width**
+- `predict_forecast.py` now raises if `outputs/models/<target>/oof_band.csv` is missing,
+  unreadable, missing a horizon, or has a non-finite `q_lo`/`q_hi`, instead of filling with 0.
+- `train_production_models.py` now refuses to publish a target's `.joblib` pipelines if
+  `oof_residuals()` can't produce a complete, finite band for every horizon.
+
+**High — ensemble weights could drift from the trained model version**
+- `predict_forecast.py` now reads and validates `outputs/models/final_ensemble_weights_used.json`
+  (the training-time snapshot `train_production_models.py` writes) instead of
+  `params/ensemble_weights_*.json`, checking every weight is finite/non-negative/non-zero-sum
+  per horizon and re-normalizing defensively. Confirmed the existing root-level
+  `outputs/final_ensemble_weights_used.json` / `backend/app/config.py` /
+  `backend/app/routers/model.py` "for inspection" copy is a deliberate second file, not a
+  path mismatch — left as-is.
+
+**High — feature-quality gate accepted a partial demo schema**
+- `ingestion/data_quality_check.py` now fails closed (exit 1) if `features/feature_list.txt`
+  or `features/targets.json` are missing/empty/unparseable, if `(station, date)` keys are
+  missing or duplicated, if any listed feature column is absent, or if any target's actual
+  column or horizon-target columns (1–10) are incomplete. Confirmed this correctly fails on
+  the bundled 7-column demo table, naming the two missing files.
+
+**Medium — daily feature-schema drift could break an older saved model**
+- `model_common.py`'s `predict_latest()` now aligns each prediction frame to the saved
+  pipeline's own `feature_names_in_`: a feature added since training is dropped, a feature
+  the pipeline expects but the current build no longer has is passed as NaN for the fitted
+  step's own imputer to handle, instead of crashing on a column mismatch.
+
+**Still open**
+- `README.md` has not yet been reconciled with the above (the audit report's "Files changed"
+  list already named it; this pass didn't touch it).
+- This archive still lacks the model/feature artifacts the audit flagged as structurally
+  absent (`*.joblib`, `oof_band.csv`, `final_ensemble_weights_used.json` under
+  `outputs/models/`, `features/feature_list.txt`, `features/targets.json`,
+  `final_delhi_dataset.csv`) — none of the fixes above fabricate those; a real
+  `train_production_models.py` → `predict_forecast.py` run on real source data is still
+  required before `/api/health` can report `status=ok`.
+
+
+## 2026-11-12 — operations and product pass
+
+- Production retraining reads and validates committed `params/*.json` files; it never tunes or writes them.
+- The scheduled full-tuning workflow is removed from the delivered workflow set. The local-only `tune_parameters_offline.py` produces preview candidates under `outputs/parameter_tuning_preview/` and cannot overwrite production params. The walk-forward notebook defaults `RUN_TUNING` and `RUN_SHAP` to false.
+- MLflow uses PostgreSQL for tracking/registry metadata and an S3-compatible bucket for durable run and model artifacts. GitHub Actions refuses to run production MLflow logging without those stores and credentials.
+- The frontend now has Overview, Forecast, Stations, Model health and Methodology views, with responsive navigation and API-backed data.
+- Verification performed on this packaged snapshot is documented in `PROJECT_AUDIT.md`.
+
+## 2026-11-12 update
+
+- Supersedes the earlier historical note about `research_retrain.yml`: the
+  scheduled full-tuning workflow is removed from this delivery and must be
+  deleted from the existing GitHub checkout if it is still present.
+- Production retraining uses committed fixed parameter/weight JSON files only.
+  Full tuning remains a local report-only script and cannot overwrite them.
+- MLflow tracking and model artifacts are configured for PostgreSQL plus
+  S3-compatible object storage; GitHub Actions requires the corresponding
+  repository secrets before a retrain can run.
+- Frontend refreshed into Overview, Forecast, Stations, Model health, and
+  Methodology pages.

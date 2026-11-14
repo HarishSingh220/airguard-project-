@@ -1,0 +1,22 @@
+{
+  "AQI": {
+    "prefix": "target_h",
+    "actual": "d_AQI"
+  },
+  "PM25": {
+    "prefix": "target_pm25_h",
+    "actual": "d_PM25"
+  },
+  "O3": {
+    "prefix": "target_o3_h",
+    "actual": "d_O3"
+  },
+  "O3_8H": {
+    "prefix": "target_o3max8_h",
+    "actual": "d_O3_max8h"
+  },
+  "NOx": {
+    "prefix": "target_nox_h",
+    "actual": "d_NOx"
+  }
+}

@@ -1,0 +1,50 @@
+{
+ "trained_at": "2026-10-31T20:12:04.489798+00:00",
+ "targets": {
+  "AQI": {
+   "trained_up_to": "2025-12-31",
+   "members": [
+    "LightGBM",
+    "RandomForest",
+    "Ridge",
+    "XGBoost"
+   ]
+  },
+  "PM25": {
+   "trained_up_to": "2025-12-31",
+   "members": [
+    "LightGBM",
+    "RandomForest",
+    "Ridge",
+    "XGBoost"
+   ]
+  },
+  "O3": {
+   "trained_up_to": "2025-12-31",
+   "members": [
+    "LightGBM",
+    "RandomForest",
+    "Ridge",
+    "XGBoost"
+   ]
+  },
+  "O3_8H": {
+   "trained_up_to": "2025-12-31",
+   "members": [
+    "LightGBM",
+    "RandomForest",
+    "Ridge",
+    "XGBoost"
+   ]
+  },
+  "NOx": {
+   "trained_up_to": "2025-12-31",
+   "members": [
+    "LightGBM",
+    "RandomForest",
+    "Ridge",
+    "XGBoost"
+   ]
+  }
+ }
+}

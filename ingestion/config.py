@@ -31,6 +31,15 @@ Optional environment variables:
                         /resource/<id> path and query string it always has.
 """
 import os
+from pathlib import Path
+
+# Load the repository-root .env for local runs. In GitHub Actions, secrets are
+# injected as environment variables and override=False preserves those values.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+except ImportError:
+    pass
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
@@ -67,6 +76,12 @@ DELHI_LAT, DELHI_LON = 28.6139, 77.2090
 # (west, south, east, north), matching the belt build_features.py expects
 # fire_daily_features.csv to already summarise.
 FIRE_BBOX = (73.5, 27.5, 78.5, 32.5)
+
+# 1-degree box (N, W, S, E) around the Delhi centroid, used by both ADS CAMS
+# requests (fetch_cams.py's daily forecast pull and cds_backfill.py's
+# "cams-no2-o3" backfill job) -- same dataset, same area, kept in one place
+# so they can't drift apart.
+CAMS_BBOX = [DELHI_LAT + 0.5, DELHI_LON - 0.5, DELHI_LAT - 0.5, DELHI_LON + 0.5]
 
 PRESSURE_LEVELS = [1000, 925, 850, 700, 500, 300]
 # era5_inputs.levels6_daily() also uses spd300 (wind speed at 300 hPa), hence 300 here.

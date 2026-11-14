@@ -1,85 +1,80 @@
-name: Rebuild forecast
-
-# Production path only: ingest -> export -> feature generation -> data-quality gate
-# -> forecast. Tuning and SHAP are NOT part of this workflow -- see research_retrain.yml
-# for that. Model FITTING isn't part of this workflow either, as of the 30-day walk-forward
-# retrain design -- see retrain_model.yml: this workflow only loads whatever
-# outputs/models/ already holds (committed by the last retrain, at most ~30 days stale)
-# and predicts against today's features. Keeping all three separate means: this runs in
-# a couple of minutes, not up to two hours; it can't silently drift
-# best_params_*.json/ensemble_weights_*.json day to day; and the daily commit never
-# includes model-internals files (the notebook, SHAP outputs, refitted model binaries)
-# that have nothing to do with "today's forecast changed".
+name: Rebuild daily AirGuard forecast
 
 on:
   schedule:
-    - cron: "0 1 * * *"      # once daily, 01:00 UTC (about 06:30 IST), after a few ingest runs
+    - cron: "0 1 * * *" # 06:30 IST
   workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: airguard-production-repository-writes
+  cancel-in-progress: false
 
 jobs:
   rebuild:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write        # needed to commit features/ and outputs/ back to the repo
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install ingestion dependencies
-        working-directory: ingestion
-        run: pip install -r requirements.txt
+        run: python -m pip install -r ingestion/requirements.txt
 
-      - name: Install modeling dependencies
-        # Needed even though this workflow doesn't fit anything -- joblib.load() still needs
-        # the xgboost/lightgbm/scikit-learn classes available to unpickle the saved pipelines.
-        # statsmodels dropped here: only the research notebook (research_retrain.yml) uses it.
-        run: pip install pandas numpy scikit-learn xgboost lightgbm joblib
+      - name: Install model runtime dependencies
+        run: python ingestion/install_model_runtime.py
 
-      - name: Export combined historical + live data from Postgres
-        # Run from the repo root (not working-directory: ingestion) so the CSVs land
-        # next to build_features.py; running "python ingestion/x.py" still puts
-        # ingestion/ on sys.path, so its "from config import ..." imports still resolve.
+      - name: Validate persistent database and historical migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python ingestion/validate_database.py
+
+      - name: Export current historical and live data
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python ingestion/export_for_modeling.py
 
-      - name: Regenerate fire_daily_features.csv (historical + live, via fire_features.py)
+      - name: Rebuild fire features
         run: python ingestion/rebuild_fire_daily.py
 
-      - name: Build the daily feature table
+      - name: Build feature table
         run: python build_features.py
 
-      - name: Check live-feature data quality (Finding 5)
-        # Quantifies known live/historical source gaps (see README "Things worth checking") and
-        # fails here -- before the model step -- if any feature's live-tail missingness is worse
-        # than documented (or than its own historical rate), or a feature with no documented gap
-        # starts showing one, or the exported data itself is stale. See
-        # ingestion/data_quality_check.py for the full rationale and current ceilings.
+      - name: Validate feature quality
         run: python ingestion/data_quality_check.py
 
-      - name: Predict the 10-day forecast from the last retrained models
-        # predict_forecast.py loads outputs/models/<target>/<model>_h<h>.joblib -- fitted by
-        # train_production_models.py on its own ~30-day schedule (retrain_model.yml) -- and
-        # scores them against today's feature row. It does not fit, tune, or recompute
-        # anything; it only writes outputs/forecast_10d_*.csv. Fails clearly if no retrain has
-        # ever run yet (see predict_forecast.py's error message).
+      - name: Check that all production model artifacts are present
+        id: model_check
+        run: python ingestion/check_model_artifacts.py
+
+      - name: Generate forecast using committed joblib models
+        if: steps.model_check.outputs.ready == 'true'
         run: python predict_forecast.py
 
-      - name: Commit updated data, features and forecast outputs
+      - name: Explain why forecast generation was skipped
+        if: steps.model_check.outputs.ready != 'true'
+        run: |
+          echo "## Forecast skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "The production model artifact manifest is incomplete. Restore/commit the trained outputs/models files or configure model artifact download before forecast generation." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit refreshed features and forecast files
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Automated daily rebuild: live data, features and forecast"
-          # final_delhi_dataset.csv is intentionally excluded here: the existing .gitignore
-          # already keeps it untracked (it's the largest file), so export_for_modeling.py
-          # regenerates it locally for build_features.py to read but it is never committed.
-          # No notebook here -- see research_retrain.yml for that path. outputs/* includes
-          # outputs/models/, but predict_forecast.py never touches those files, so they're
-          # simply unchanged (no-op) in this commit on every day that isn't also a retrain day.
+          commit_message: "Daily rebuild: refresh AirGuard features and forecast"
           file_pattern: >-
-            era5_surface_hourly_ist.csv era5_pressure_levels_6h_ist.csv
-            era5_pressure_levels_12h_ist.csv cams_3h_ist.csv fire_daily_features.csv
-            features/* outputs/*
+            era5_surface_hourly_ist.csv
+            era5_pressure_levels_6h_ist.csv
+            era5_pressure_levels_12h_ist.csv
+            cams_3h_ist.csv
+            fire_daily_features.csv
+            features/**
+            outputs/forecast_10d_*.csv
+            outputs/final_ensemble_weights_used.json
+            outputs/demo_data_marker.json

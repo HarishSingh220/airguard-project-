@@ -1,17 +1,44 @@
-# created by virtualenv automatically
-__pycache__/
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+frontend/.env.local
+frontend/.env.*.local
+
+# Python environments and caches
+.venv/
+venv/
 airguard/
-delhi_aqi_features.csv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# MLflow local tracking store (production uses PostgreSQL + object storage)
+mlruns/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
+
+# Local tuning output; the committed production params remain under params/
+outputs/parameter_tuning_preview/
+params/_backups/
+
+# Generated intermediate datasets and temporary output
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Keep outputs/models/*.joblib tracked: they are the production inference artifacts.
+
+# Local exported training dataset
 final_delhi_dataset.csv
 
-
-# ingestion-related (regenerated from Postgres by export_for_modeling.py / rebuild_fire_daily.py)
-live_fire_modis.csv
-live_fire_viirs.csv
-combined_fire_modis.csv
-combined_fire_viirs.csv
-weather_forecast_future_surface.csv
-weather_forecast_future_pressure.csv
-weather_forecast_future_cams.csv
-.cdsapirc
-.env
+# Full OOF residual diagnostics are retained in MLflow, not needed for inference
+outputs/models/*/oof_band_full.csv

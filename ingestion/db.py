@@ -27,8 +27,15 @@ def get_engine():
     # doesn't depend on which exact scheme the provider happened to give you.
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith(("postgresql+psycopg2://", "postgresql+psycopg://")):
+        url = "postgresql://" + url.split("://", 1)[1]
     try:
-        return create_engine(url)
+        return create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"connect_timeout": 15},
+        )
     except Exception as exc:
         # create_engine() only validates the URL string (it does not connect yet), so a
         # malformed DATABASE_URL -- e.g. a typo'd scheme or missing "://" -- fails here
@@ -181,7 +188,7 @@ def upsert_dataframe(engine, table, df, pk_cols, batch_size=1000):
     return len(df)
 
 
-def log_run(engine, job, started_at, finished_at, rows_written, status, message=""):
+def log_run(engine, job, started_at, finished_at, rows_written, status, message="", *, raise_on_error=False):
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -191,7 +198,10 @@ def log_run(engine, job, started_at, finished_at, rows_written, status, message=
                  "rows_written": rows_written, "status": status, "message": (message or "")[:2000]},
             )
     except SQLAlchemyError as exc:
-        # Logging the run is important for monitoring (check_retrain_due.py reads this
-        # table) but it must never be what fails an otherwise-successful ingestion run,
-        # so this is deliberately a warning, not a re-raise.
+        # Ordinary ingestion jobs use best-effort logging so an audit-table
+        # outage does not turn a successful fetch into a failed data ingestion.
+        # The production retrainer opts into raise_on_error=True because its
+        # 30-day schedule depends on this marker being persisted.
+        if raise_on_error:
+            raise
         print(f"WARNING: could not write to ingestion_log for job={job!r} status={status!r}: {exc}")

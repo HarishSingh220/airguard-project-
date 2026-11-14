@@ -5,6 +5,10 @@ on:
     - cron: "15 */3 * * *"   # every 3 hours, 15 minutes past, UTC
   workflow_dispatch: {}      # lets you trigger a run manually from the Actions tab
 
+concurrency:
+  group: airguard-ingest-all-sources
+  cancel-in-progress: false
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -22,32 +26,22 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write ~/.cdsapirc for the Copernicus ADS client
+      - name: Configure Copernicus ADS credentials
+        env:
+          CDSAPI_URL: ${{ secrets.CDSAPI_URL }}
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
         run: |
-          cat > ~/.cdsapirc << EOF
-          url: ${{ secrets.CDSAPI_URL }}
-          key: ${{ secrets.CDSAPI_KEY }}
-          EOF
-
-      - name: Diagnose api.data.gov.in connectivity
-        # Informational only -- never fails the job. Helps tell apart a DNS problem,
-        # a routing/firewall drop (connect just hangs, no TCP handshake), and a slow
-        # TLS handshake, ahead of whatever fetch_cpcb.py itself reports.
-        continue-on-error: true
-        run: |
-          echo "--- DNS resolution ---"
-          getent hosts api.data.gov.in || true
-          echo "--- TCP connect timing (10s cap) ---"
-          curl -sv --connect-timeout 10 -o /dev/null https://api.data.gov.in/ 2>&1 | \
-            grep -E "Trying|Connected|timed out|Failed" || true
+          if [ -z "$CDSAPI_URL" ] || [ -z "$CDSAPI_KEY" ]; then
+            echo "::error::Set both CDSAPI_URL and CDSAPI_KEY in repository Actions secrets."
+            exit 1
+          fi
+          printf 'url: %s\nkey: %s\n' "$CDSAPI_URL" "$CDSAPI_KEY" > "$HOME/.cdsapirc"
+          chmod 600 "$HOME/.cdsapirc"
 
       - name: Run all fetchers
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-          CPCB_API_KEY: ${{ secrets.CPCB_API_KEY }}
-          # Optional -- see ingestion/cpcb_proxy_worker.js. Leave the repo
-          # secret unset and this is simply empty, which fetch_cpcb.py treats
-          # as "call api.data.gov.in directly" (today's behavior).
-          CPCB_PROXY_URL: ${{ secrets.CPCB_PROXY_URL }}
+          CDSAPI_URL: ${{ secrets.CDSAPI_URL }}
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
         run: python run_all.py

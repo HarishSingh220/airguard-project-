@@ -26,6 +26,24 @@ STATION_COLS = ["PM25", "PM10", "NO", "NO2", "NOx", "NH3", "SO2", "CO", "O3", "B
 
 
 IST = "Asia/Kolkata"
+REQUIRED_HISTORICAL_CSVS = (
+    "final_delhi_dataset.csv",
+    "era5_surface_hourly_ist.csv",
+    "era5_pressure_levels_6h_ist.csv",
+    "era5_pressure_levels_12h_ist.csv",
+    "cams_3h_ist.csv",
+)
+
+
+def validate_input_files():
+    missing = [name for name in REQUIRED_HISTORICAL_CSVS if not Path(name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Historical migration cancelled before writing any rows. Missing input CSV(s): "
+            + ", ".join(missing)
+            + ". Generate final_delhi_dataset.csv from data_preprosessing.ipynb and restore "
+              "the ERA5/CAMS CSV exports before retrying."
+        )
 
 
 def load_csv(path, parse_dates, tz_cols=()):
@@ -95,6 +113,9 @@ def migrate_cams(engine):
 
 
 def main():
+    # Do not silently skip missing inputs and then log a partial migration as
+    # successful; the scheduled export/training jobs require all five sources.
+    validate_input_files()
     engine = get_engine()
     init_schema(engine)
     started = datetime.now(timezone.utc)

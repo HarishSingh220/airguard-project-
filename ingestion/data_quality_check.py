@@ -21,12 +21,16 @@ features, which is a product decision, not something a script can decide for
 you. What this gives you is the actual numbers to make that decision with,
 every run, instead of discovering it from a bad forecast.
 """
+import json
 import sys
 from pathlib import Path
 
 import pandas as pd
 
 FEATURES_PATH = Path("features/daily_features.csv")
+FEATURE_LIST_PATH = Path("features/feature_list.txt")
+TARGETS_JSON_PATH = Path("features/targets.json")
+FORECAST_HORIZONS = list(range(1, 11))
 
 # Columns the README already documents as having a different, weaker live
 # source than their historical counterpart. These are *expected* to show
@@ -55,6 +59,30 @@ KNOWN_GAP_COLUMNS = {
 # missingness. This is the ceiling for an *unexpected* gap.
 MAX_UNEXPECTED_MISSING = 0.15
 
+# Documented, known-dated station-data outages (not a per-column gap like
+# KNOWN_GAP_COLUMNS above -- a whole-pipeline event, like CPCB's live feed having no
+# history/backfill endpoint, see fetch_cpcb.py's docstring). Right after such a gap
+# closes, every AQI/pollutant lag and rolling feature (the "families" listed) is
+# legitimately ~100% missing in the live tail for up to LAG_GRACE_DAYS -- that's the
+# gap re-appearing through the features that look back over it, not a new failure.
+# Fill in real dates once you know them (see README's "gap" discussion / MLFLOW_GUIDE.md);
+# leave the list empty if there's no known gap to account for.
+#
+# Example once dates are known:
+#   {"start": "2025-12-31", "end": "2026-10-11",
+#    "families": {"AQI history", "Pollutant history", "Pollutant current", "City state"},
+#    "note": "CPCB live feed has no backfill endpoint -- permanent gap for this window"}
+KNOWN_GAP_WINDOWS = []
+
+# Longest lookback window any "Pollutant history"/"AQI history" feature uses
+# (AQI_roll_mean_30d, station_data_missing_frac_30d) -- a known gap keeps inflating
+# those features' missingness for this many days after live data resumes, purely
+# because the lookback window still partially overlaps the gap. Matches
+# build_features.py's longest rolling/lag window (30 days).
+LAG_GRACE_DAYS = 30
+
+FEATURE_GROUPS_PATH = Path("features/feature_groups.json")
+
 # How many of the most recent days count as "the live tail" for this check.
 # Generous on purpose -- this is a coarse early-warning check, not a precise
 # historical/live boundary detector (export_for_modeling.py knows the real
@@ -76,6 +104,68 @@ MAX_STALENESS_DAYS = 2
 BASELINE_MARGIN = 0.05
 
 
+def _check_model_schema_present(df):
+    """A missingness-only check on daily_features.csv is not enough to prove the
+    columns the forecasting estimators actually use exist: that file can have
+    the right shape and still be a demo/partial table (see
+    backend/dev/generate_sample_data.py's 7-column sample). Fails closed --
+    returns a list of fatal problems -- if the full generated feature schema
+    (feature_list.txt, targets.json), the station/date key, or every horizon
+    target column for every declared target isn't actually present.
+    """
+    problems = []
+
+    if not FEATURE_LIST_PATH.exists():
+        problems.append(f"{FEATURE_LIST_PATH} not found -- run build_features.py first.")
+    if not TARGETS_JSON_PATH.exists():
+        problems.append(f"{TARGETS_JSON_PATH} not found -- run build_features.py first.")
+    if problems:
+        return problems  # nothing else below can be checked without these
+
+    try:
+        feature_list = [c.strip() for c in FEATURE_LIST_PATH.read_text().splitlines() if c.strip()]
+    except OSError as exc:
+        return [f"{FEATURE_LIST_PATH} could not be read: {exc}"]
+    if not feature_list:
+        problems.append(f"{FEATURE_LIST_PATH} is empty.")
+
+    try:
+        targets = json.loads(TARGETS_JSON_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return problems + [f"{TARGETS_JSON_PATH} could not be read/parsed: {exc}"]
+    if not targets:
+        problems.append(f"{TARGETS_JSON_PATH} is empty.")
+
+    if "station" not in df.columns or "date" not in df.columns:
+        problems.append("daily_features.csv is missing the station and/or date key column(s).")
+    else:
+        dup = df.duplicated(subset=["station", "date"]).sum()
+        if dup:
+            problems.append(f"daily_features.csv has {int(dup)} duplicate (station, date) rows.")
+
+    missing_features = [c for c in feature_list if c not in df.columns]
+    if missing_features:
+        problems.append(
+            f"{len(missing_features)} feature(s) listed in {FEATURE_LIST_PATH} are absent from "
+            f"daily_features.csv, e.g. {missing_features[:5]}."
+        )
+
+    for target_name, meta in (targets.items() if isinstance(targets, dict) else []):
+        prefix = meta.get("prefix") if isinstance(meta, dict) else None
+        actual_col = meta.get("actual") if isinstance(meta, dict) else None
+        if actual_col and actual_col not in df.columns:
+            problems.append(f"target {target_name!r}'s actual column {actual_col!r} is missing.")
+        if prefix:
+            missing_h = [h for h in FORECAST_HORIZONS if f"{prefix}{h}" not in df.columns]
+            if missing_h:
+                problems.append(
+                    f"target {target_name!r} is missing horizon target column(s) for {missing_h} "
+                    f"(expected {prefix}1 .. {prefix}{FORECAST_HORIZONS[-1]})."
+                )
+
+    return problems
+
+
 def main():
     if not FEATURES_PATH.exists():
         print(f"SKIP: {FEATURES_PATH} not found (run build_features.py first)")
@@ -85,6 +175,14 @@ def main():
     if df.empty:
         print("SKIP: daily_features.csv is empty")
         return 0
+
+    schema_problems = _check_model_schema_present(df)
+    if schema_problems:
+        print(f"FAIL: the full model feature/target schema is not present -- "
+              f"a missingness-only check on daily_features.csv cannot substitute for this:")
+        for p in schema_problems:
+            print(f"  - {p}")
+        return 1
 
     # Required-input staleness is a separate, simpler check: if the file itself
     # hasn't moved in MAX_STALENESS_DAYS, ingestion has stalled (or never ran),
@@ -114,11 +212,32 @@ def main():
     print(f"Live-tail window: {tail['date'].min().date()} .. {tail['date'].max().date()} "
           f"({tail['date'].nunique()} days)")
 
+    # Which columns get a temporarily relaxed ceiling because the live tail still falls
+    # within LAG_GRACE_DAYS of a documented gap window closing -- see KNOWN_GAP_WINDOWS.
+    # This expires automatically: once today is more than LAG_GRACE_DAYS past a window's
+    # end, that window no longer relaxes anything, and persistently-high missingness
+    # past that point correctly fails again as a real, new problem.
+    grace_relaxed = {}
+    if KNOWN_GAP_WINDOWS:
+        try:
+            feature_groups = json.loads(FEATURE_GROUPS_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            feature_groups = {}
+        for win in KNOWN_GAP_WINDOWS:
+            gap_end = pd.Timestamp(win["end"])
+            grace_end = gap_end + pd.Timedelta(days=LAG_GRACE_DAYS)
+            if tail["date"].max() <= grace_end:
+                for col in feature_cols:
+                    if feature_groups.get(col) in win["families"]:
+                        grace_relaxed[col] = win["note"]
+
     failures = []
     report_rows = []
     for col in feature_cols:
         tm, hm = tail_missing[col], hist_missing.get(col, 0.0)
         report_rows.append((col, hm, tm))
+        if col in grace_relaxed:
+            continue  # within a documented gap's grace period -- expected, not a new failure
         ceiling = KNOWN_GAP_COLUMNS.get(col, MAX_UNEXPECTED_MISSING)
         # Fail only if the live tail both exceeds the absolute ceiling AND is
         # meaningfully worse than this feature's own historical rate -- a tail
@@ -126,6 +245,14 @@ def main():
         # that has always been there) is not a new ingestion failure.
         if tm > ceiling and tm > hm + BASELINE_MARGIN:
             failures.append((col, hm, tm, ceiling, col in KNOWN_GAP_COLUMNS))
+
+    if grace_relaxed:
+        print(f"\n{len(grace_relaxed)} feature(s) exempted this run -- within a documented gap's "
+              f"grace period:")
+        for col, note in list(grace_relaxed.items())[:10]:
+            print(f"  - {col}: {note}")
+        if len(grace_relaxed) > 10:
+            print(f"  ... and {len(grace_relaxed) - 10} more")
 
     report = pd.DataFrame(report_rows, columns=["feature", "historical_missing", "live_tail_missing"])
     report = report.sort_values("live_tail_missing", ascending=False)

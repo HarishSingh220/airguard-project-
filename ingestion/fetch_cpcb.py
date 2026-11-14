@@ -30,6 +30,7 @@ everyone right now, which no amount of retrying or proxying can route around
 -- at that point the 15-minute schedule (not a longer retry budget within a
 single run) is what limits the resulting gap.
 """
+import math
 import sys
 from datetime import datetime, timezone
 
@@ -44,6 +45,11 @@ RESOURCE = "3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
 RESOURCE_PATH = f"/resource/{RESOURCE}"
 DIRECT_URL = f"https://api.data.gov.in{RESOURCE_PATH}"
 PAGE_SIZE = 500
+EXPECTED_COLUMNS = [
+    "station", "city", "pollutant", "unit", "value_avg", "value_min",
+    "value_max", "observed_at", "source",
+]
+PRIMARY_KEY = ["station", "pollutant", "observed_at", "source"]
 
 
 def request_url():
@@ -120,7 +126,8 @@ def build_dataframe(records, station_lookup):
         def num(key):
             v = r.get(key)
             try:
-                return float(v)
+                value = float(v)
+                return value if math.isfinite(value) else None
             except (TypeError, ValueError):
                 return None
 
@@ -130,7 +137,20 @@ def build_dataframe(records, station_lookup):
             "value_min": num("pollutant_min"), "value_max": num("pollutant_max"),
             "observed_at": observed_at, "source": "data.gov.in",
         })
-    return pd.DataFrame(rows)
+    # Keep a stable schema even when the API returns no matching records.
+    # db.upsert_dataframe validates PK columns before checking df.empty.
+    return pd.DataFrame(rows, columns=EXPECTED_COLUMNS)
+
+
+def _record_diagnostic(records, limit=3):
+    """Return a small, credential-free sample of the response fields for logs."""
+    relevant = ("station", "pollutant_id", "last_update", "pollutant_avg",
+                "pollutant_min", "pollutant_max", "pollutant_unit")
+    samples = []
+    for record in records[:limit]:
+        samples.append({key: record.get(key) for key in relevant if key in record})
+    keys = sorted(records[0].keys()) if records else []
+    return {"record_keys": keys, "sample_pollutant_fields": samples}
 
 
 def main():
@@ -146,25 +166,68 @@ def main():
         print("\n".join(seen_stations))
         return
 
-    df = build_dataframe(records, station_lookup)
-    matched = sorted(set(df["station"])) if not df.empty else []
-    missing = [name for name in STATIONS if name not in matched]
-    if missing:
-        print(f"WARNING: no current reading for {missing}. "
-              f"Check their cpcb_name in config.py against the station names below:")
-        print("\n".join(seen_stations))
-
     engine = get_engine()
     init_schema(engine)
     started = datetime.now(timezone.utc)
     try:
-        n = upsert_dataframe(engine, "cpcb_hourly", df, pk_cols=["station", "pollutant", "observed_at", "source"])
-        # Missing stations are a partial failure, not a clean "ok" -- make that visible in
-        # ingestion_log instead of only printing a warning that nothing else reads.
-        status = "ok" if not missing else "ok (partial)"
-        message = f"missing stations: {missing}" if missing else ""
+        if not records:
+            message = "data.gov.in returned no records for the Delhi filter; no rows inserted."
+            log_run(engine, "fetch_cpcb", started, datetime.now(timezone.utc), 0, "ok", message)
+            print(message)
+            return
+
+        df = build_dataframe(records, station_lookup)
+        if df.empty:
+            diagnostic = _record_diagnostic(records)
+            raise RuntimeError(
+                f"CPCB returned {len(records)} records, but none matched the configured stations, "
+                f"pollutant IDs, and timestamp format. Configured station names: "
+                f"{sorted(station_lookup)}. Response diagnostic: {diagnostic}"
+            )
+
+        # CPCB can return duplicate rows for the same database conflict key in a
+        # single paginated response. PostgreSQL rejects one ON CONFLICT statement
+        # that tries to update the same key twice, so retain the last source row.
+        # export_for_modeling.py consumes value_avg specifically. Rows that only
+        # have min/max but no average cannot contribute to the live feature table.
+        value_mask = df["value_avg"].notna()
+        no_value_rows = int((~value_mask).sum())
+        if not value_mask.any():
+            diagnostic = _record_diagnostic(records)
+            raise RuntimeError(
+                f"CPCB returned {len(records)} station/pollutant records, but all "
+                f"{len(df)} mapped rows had NULL/non-numeric pollutant_avg values. "
+                f"Refusing to persist rows that cannot contribute to the live feature export. "
+                f"Response diagnostic: {diagnostic}"
+            )
+        df = df.loc[value_mask].copy()
+        before_dedup = len(df)
+        df = df.drop_duplicates(subset=PRIMARY_KEY, keep="last")
+        duplicate_rows = before_dedup - len(df)
+
+        matched = sorted(set(df["station"])) if not df.empty else []
+        missing = [name for name in STATIONS if name not in matched]
+        if missing:
+            print(f"WARNING: no valid current reading for {missing}. "
+                  "Check their cpcb_name in config.py against station names returned by CPCB:")
+            print("\n".join(seen_stations))
+
+        n = upsert_dataframe(engine, "cpcb_hourly", df, pk_cols=PRIMARY_KEY)
+        notes = []
+        if missing:
+            notes.append(f"missing stations: {missing}")
+        if no_value_rows:
+            notes.append(f"dropped {no_value_rows} rows with no numeric pollutant values")
+        if duplicate_rows:
+            notes.append(f"collapsed {duplicate_rows} duplicate primary-key rows (kept last)")
+        status = "ok" if not notes else "ok (partial)"
+        message = "; ".join(notes)
         log_run(engine, "fetch_cpcb", started, datetime.now(timezone.utc), n, status, message)
-        print(f"cpcb_hourly: upserted {n} rows for {len(matched)} of {len(STATIONS)} stations")
+        print(
+            f"cpcb_hourly: upserted {n} valid, unique rows for {len(matched)} "
+            f"of {len(STATIONS)} stations; dropped_no_value={no_value_rows}, "
+            f"deduplicated={duplicate_rows}"
+        )
     except Exception as exc:
         log_run(engine, "fetch_cpcb", started, datetime.now(timezone.utc), 0, "error", str(exc))
         raise

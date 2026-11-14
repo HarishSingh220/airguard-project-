@@ -28,6 +28,7 @@ import requests
 from config import DELHI_LAT, DELHI_LON, PRESSURE_LEVELS
 from db import get_engine, init_schema, log_run, upsert_dataframe
 from http_utils import get_with_retry
+from time_utils import parse_ist_grid as _parse_ist_grid
 
 IST = "Asia/Kolkata"
 URL = "https://api.open-meteo.com/v1/forecast"
@@ -95,14 +96,6 @@ def fetch():
             print(f"fetch_openmeteo: attempt {attempt}/{BODY_RETRY_ATTEMPTS} got a bad body ({exc}); retrying")
             time.sleep(BODY_RETRY_BACKOFF * attempt)
     raise last_exc  # pragma: no cover -- loop above always returns or raises first
-
-
-def _parse_ist_grid(time_strings):
-    """Open-Meteo's 'time' values are naive local-time labels when timezone
-    is requested explicitly (no UTC offset in the string). Localize as IST,
-    then convert to UTC so this matches every other table's instant convention."""
-    naive = pd.to_datetime(time_strings)
-    return naive.tz_localize(IST, ambiguous="infer", nonexistent="shift_forward").tz_convert("UTC")
 
 
 def build_surface(hourly, run_time):

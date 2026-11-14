@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
-from db import get_engine
+from db import get_engine, init_schema
 
 RETRAIN_INTERVAL_DAYS = 30
 
@@ -42,6 +42,9 @@ def main():
         due, reason = True, "forced via workflow_dispatch input"
     else:
         engine = get_engine()
+        # The gate can be the first workflow to touch a newly-created database.
+        # Ensure ingestion_log exists before querying it.
+        init_schema(engine)
         with engine.connect() as conn:
             last = conn.execute(text(
                 "SELECT finished_at FROM ingestion_log "

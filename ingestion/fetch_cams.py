@@ -28,7 +28,7 @@ import cdsapi
 import pandas as pd
 import xarray as xr
 
-from config import DELHI_LAT, DELHI_LON
+from config import CDSAPI_KEY, CDSAPI_URL, DELHI_LAT, DELHI_LON, CAMS_BBOX
 from db import get_engine, init_schema, log_run, upsert_dataframe
 
 DATASET = "cams-global-atmospheric-composition-forecasts"
@@ -48,12 +48,12 @@ VAR_COLUMN = {
 # Despite the name/extension, what lands here may be an actual zip or a plain
 # .nc file -- see to_dataframe()'s zipfile.is_zipfile() check. The extension is
 # just a local scratch filename; neither zipfile nor xarray care what it's called.
-DOWNLOAD_PATH = Path("/tmp/cams_forecast.zip")
+DOWNLOAD_PATH = Path(tempfile.gettempdir()) / "cams_forecast.zip"
 
 
 def build_request():
     today = datetime.now(timezone.utc).date().isoformat()
-    box = [DELHI_LAT + 0.5, DELHI_LON - 0.5, DELHI_LAT - 0.5, DELHI_LON + 0.5]  # N, W, S, E
+    box = CAMS_BBOX  # N, W, S, E
     return {
         "variable": VARIABLES, "date": [f"{today}/{today}"], "time": ["00:00"],
         "leadtime_hour": LEADTIME_HOURS, "type": ["forecast"],
@@ -79,7 +79,15 @@ def _forecast_init_time():
 
 
 def fetch(request):
-    client = cdsapi.Client()   # reads ~/.cdsapirc (URL and key), written by the workflow from secrets
+    # Prefer repository-root .env / process environment for local deployments.
+    # If both are absent, retain cdsapi's normal ~/.cdsapirc behavior (used by
+    # GitHub Actions after the workflow writes the credential file).
+    if bool(CDSAPI_URL) != bool(CDSAPI_KEY):
+        raise RuntimeError(
+            "Set both CDSAPI_URL and CDSAPI_KEY, or configure both values in ~/.cdsapirc. "
+            "For live CAMS ingestion these must be Copernicus ADS credentials."
+        )
+    client = cdsapi.Client(url=CDSAPI_URL, key=CDSAPI_KEY) if CDSAPI_URL and CDSAPI_KEY else cdsapi.Client()
     client.retrieve(DATASET, request).download(str(DOWNLOAD_PATH))
     return DOWNLOAD_PATH
 

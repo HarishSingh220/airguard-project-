@@ -243,6 +243,21 @@ def build_daily(raw, ext, ext_groups):
         add(f"city_{nm}_lag_1d", d["date"].map(city[c].shift(1)), "City state")
         add(f"city_{nm}_roll_mean_7d", d["date"].map(city[c].rolling(7, min_periods=4).mean()), "City state")
 
+    # Data-quality signal: what fraction of the trailing lookback actually has a real
+    # d_AQI reading, per station. Not AQI-specific in spirit -- d_AQI requires PM25/PM10
+    # coverage, so it's a reliable proxy for "is station ingestion healthy right now" in
+    # general, without needing five near-duplicate versions of this per target. This is
+    # what lets the model itself discount AQI_lag_*/roll_* features it knows are largely
+    # imputed (e.g. coming out of a multi-month ingestion outage like Dec 2025-Oct 2026)
+    # rather than trusting them at face value -- and it's causal (day t only looks at
+    # days <= t) and general-purpose: it also covers any *future* ingestion outage, not
+    # just this one. 7d catches short blips (a bad CPCB day); 30d catches a gap the size
+    # of AQI_roll_mean_30d's own window, i.e. exactly the features most exposed to one.
+    is_missing = d["d_AQI"].isna().astype(float)
+    for w in [7, 30]:
+        r = is_missing.groupby(d["station"]).rolling(w, min_periods=1).mean()
+        add(f"station_data_missing_frac_{w}d", r.reset_index(level=0, drop=True), "Data quality")
+
     # Calendar
     dt = d["date"]
     add("dayofweek", dt.dt.dayofweek, "Calendar")
@@ -319,11 +334,33 @@ def finalise(d, groups):
 # ---------------------------------------------------------------------------
 # 4. Future-leakage test
 # ---------------------------------------------------------------------------
-def leakage_test(raw, ext, ext_groups, cutoff):
+def leakage_test(raw, ext, ext_groups, cutoff, actual_col="d_AQI", nudge_search_days=220):
     """Corrupt station data and external data after the end of day `cutoff`. Every feature
-    dated on or before `cutoff` must stay identical."""
+    dated on or before `cutoff` must stay identical.
+
+    The test's power comes from comparing real (non-NaN) feature values on either side
+    of `cutoff` -- a cutoff that happens to land inside a data gap (an ingestion outage,
+    e.g. Jan-Oct 2026's CPCB gap) still runs correctly (nothing can leak from an
+    already-missing value), but exercises far fewer real features, so it's a weaker test
+    than intended. So before corrupting anything, nudge `cutoff` backward (never forward,
+    to avoid drifting it past data that's genuinely supposed to be "future" for this
+    test) to the nearest earlier day that has at least one station with a real
+    `actual_col` reading -- same spirit as main()'s own search for the latest complete day.
+    nudge_search_days defaults to 220 (wider than it'd need to be for a short outage) so
+    it can still find real coverage on the far side of something as large as the
+    documented Dec 2025-Oct 2026 CPCB gap; if nothing turns up even within that range,
+    the original cutoff is used as-is (a weaker test run, not a broken one).
+    """
     cutoff = pd.Timestamp(cutoff).normalize()
     base, groups = build_daily(raw, ext, ext_groups)
+
+    covered = base.loc[base[actual_col].notna(), "date"]
+    candidates = covered[(covered <= cutoff) & (covered >= cutoff - pd.Timedelta(days=nudge_search_days))]
+    if not candidates.empty and candidates.max() != cutoff:
+        print(f"Leakage test: nudging cutoff from {cutoff.date()} to {candidates.max().date()} "
+              f"(original cutoff had no real '{actual_col}' coverage nearby -- likely inside a "
+              f"documented ingestion gap).")
+        cutoff = candidates.max()
 
     corrupt = raw.copy()
     late = corrupt["timestamp"] >= cutoff + pd.Timedelta(days=1)
@@ -401,6 +438,27 @@ def main():
           pd.Series(ext_groups).value_counts().to_dict())
     miss_ext = ext.isna().mean().sort_values(ascending=False)
     print("External columns with the most missing days:", miss_ext.head(5).round(3).to_dict())
+
+    # Visibility for any multi-day hole in station coverage (a real one, like the
+    # documented Dec 2025-Oct 2026 CPCB gap, or a new one worth noticing) -- printed
+    # every run rather than only discovered later via a degraded forecast or a failed
+    # data_quality_check.py run.
+    print("Station AQI coverage gaps (per station, >=1 missing day within its own date range):")
+    daily_aqi = add_aqi(raw)
+    daily_aqi["date"] = daily_aqi["timestamp"].dt.floor("D")
+    has_aqi = (daily_aqi.groupby(["station", "date"])["AQI"].count() >= MIN_HOURS_PER_DAY)
+    for st, s in has_aqi.groupby(level=0):
+        covered_dates = s[s].index.get_level_values(1)
+        if covered_dates.empty:
+            continue
+        full_range = pd.date_range(covered_dates.min(), covered_dates.max(), freq="D")
+        missing = full_range.difference(covered_dates)
+        if missing.empty:
+            continue
+        gaps = (pd.Series(missing).diff() != pd.Timedelta(days=1)).cumsum()
+        longest = pd.Series(missing).groupby(gaps).agg(["min", "max", "count"]).sort_values("count").iloc[-1]
+        print(f"  {st}: largest AQI coverage gap is {int(longest['count'])} days "
+              f"({longest['min'].date()} .. {longest['max'].date()})")
 
     cutoff = PERIOD_END - pd.Timedelta(days=180)
     bad = leakage_test(raw, ext, ext_groups, cutoff)
