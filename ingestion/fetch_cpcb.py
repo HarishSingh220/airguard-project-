@@ -123,18 +123,27 @@ def build_dataframe(records, station_lookup):
         except (KeyError, ValueError):
             continue
 
-        def num(key):
-            v = r.get(key)
-            try:
-                value = float(v)
-                return value if math.isfinite(value) else None
-            except (TypeError, ValueError):
-                return None
+        def num(*keys):
+            # data.gov.in has exposed both pollutant_avg/min/max and
+            # avg_value/min_value/max_value field names for this resource.
+            # Try them in order so older responses and the current field names
+            # both map into the same database columns.
+            for key in keys:
+                v = r.get(key)
+                try:
+                    value = float(v)
+                    if math.isfinite(value):
+                        return value
+                except (TypeError, ValueError):
+                    pass
+            return None
 
         rows.append({
             "station": station_lookup[station_name], "city": "Delhi", "pollutant": pollutant,
-            "unit": r.get("pollutant_unit"), "value_avg": num("pollutant_avg"),
-            "value_min": num("pollutant_min"), "value_max": num("pollutant_max"),
+            "unit": r.get("pollutant_unit") or r.get("unit"),
+            "value_avg": num("pollutant_avg", "avg_value"),
+            "value_min": num("pollutant_min", "min_value"),
+            "value_max": num("pollutant_max", "max_value"),
             "observed_at": observed_at, "source": "data.gov.in",
         })
     # Keep a stable schema even when the API returns no matching records.
@@ -145,7 +154,8 @@ def build_dataframe(records, station_lookup):
 def _record_diagnostic(records, limit=3):
     """Return a small, credential-free sample of the response fields for logs."""
     relevant = ("station", "pollutant_id", "last_update", "pollutant_avg",
-                "pollutant_min", "pollutant_max", "pollutant_unit")
+                "pollutant_min", "pollutant_max", "pollutant_unit", "avg_value",
+                "min_value", "max_value", "unit")
     samples = []
     for record in records[:limit]:
         samples.append({key: record.get(key) for key in relevant if key in record})
