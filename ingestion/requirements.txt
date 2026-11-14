@@ -3,6 +3,7 @@ numpy
 requests
 sqlalchemy>=2.0
 psycopg2-binary
+psycopg[binary]>=3.1,<4
 cdsapi==0.7.7
 xarray
 netCDF4
