@@ -14,6 +14,7 @@ on:
       - "ingestion/export_for_modeling.py"
       - "ingestion/fetch_cpcb_recent.py"
       - "ingestion/cpcb_proxy_worker.js"
+      - "ingestion/data_quality_check.py"
 
 permissions:
   contents: write
