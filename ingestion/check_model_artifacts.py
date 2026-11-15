@@ -50,6 +50,17 @@ def check_artifacts():
                 path = MODEL_DIR / target / f"{member}_h{horizon}.joblib"
                 if not path.is_file() or path.stat().st_size == 0:
                     errors.append(f"Missing {path.relative_to(ROOT)}")
+                else:
+                    try:
+                        with path.open("rb") as artifact:
+                            prefix = artifact.read(128)
+                        if prefix.startswith(b"version https://git-lfs.github.com/spec/v1"):
+                            errors.append(
+                                f"{path.relative_to(ROOT)} is a Git LFS pointer, not the model binary; "
+                                "restore Git LFS objects before forecasting"
+                            )
+                    except OSError as exc:
+                        errors.append(f"Cannot read {path.relative_to(ROOT)}: {exc}")
 
         band_path = MODEL_DIR / target / "oof_band.csv"
         if not band_path.is_file():

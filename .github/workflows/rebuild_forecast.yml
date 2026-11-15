@@ -15,6 +15,7 @@ on:
       - "ingestion/fetch_cpcb_recent.py"
       - "ingestion/cpcb_proxy_worker.js"
       - "ingestion/data_quality_check.py"
+      - "ingestion/check_model_artifacts.py"
 
 permissions:
   contents: write
@@ -30,6 +31,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
