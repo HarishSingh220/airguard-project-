@@ -38,10 +38,13 @@ FORECAST_HORIZONS = list(range(1, 11))
 # by itself, a regression. Tune the allowed ceiling per column as you learn
 # the real live-tail rates; these starting values are deliberately generous.
 KNOWN_GAP_COLUMNS = {
-    # vertical velocity (w) on pressure levels: not available from Open-Meteo's
-    # general forecast model, NaN in the live tail (verified names, feature_list.txt)
-    "ua_w850_lag1d": 0.95, "ua_w700_lag1d": 0.95,
-    "ua_w850_chg1d": 0.95, "ua_w850_roll3d": 0.95,
+    # Specific humidity (q) and vertical velocity (w) on pressure levels are
+    # not provided by Open-Meteo; these remain unavailable in the live tail
+    # unless the separate CDS ERA5 pressure-level backfill is run. The trained
+    # model pipelines impute or natively handle missing inputs for these fields.
+    "ua_q925_lag1d": 1.0,
+    "ua_w850_lag1d": 1.0, "ua_w700_lag1d": 1.0,
+    "ua_w850_chg1d": 1.0, "ua_w850_roll3d": 1.0,
     # the 12h / 4-point pressure grid has no live source at all -- historical-only
     "ua12_t900_lag1d": 1.0, "ua12_t800_lag1d": 1.0, "ua12_u900_lag1d": 1.0, "ua12_v900_lag1d": 1.0,
     "ua12_spd900_lag1d": 1.0, "ua12_spd800_lag1d": 1.0, "ua12_r900_lag1d": 1.0, "ua12_r800_lag1d": 1.0,
