@@ -97,4 +97,3 @@ jobs:
             features/**
             outputs/forecast_10d_*.csv
             outputs/final_ensemble_weights_used.json
-            outputs/demo_data_marker.json
