@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
+from sqlalchemy import text
 
 from config import CPCB_PROXY_URL, STATIONS
 from db import get_engine, init_schema, log_run, upsert_dataframe
@@ -190,6 +191,43 @@ def _request_station_report(session, station, report_id, report_name, start, end
     return frame
 
 
+def _has_fresh_database_history(engine, now):
+    """Allow forecast rebuilds to use a recent complete backfill if CPCB is down.
+
+    This does not relax feature quality checks: it only skips another network
+    fetch when all configured stations already have a fresh 45-day history and
+    enough recent PM2.5/PM10 observations. The downstream feature gate still
+    decides whether the exported forecast inputs are usable.
+    """
+    fresh_cutoff = now.astimezone(timezone.utc) - timedelta(hours=24)
+    coverage_cutoff = now.astimezone(timezone.utc) - timedelta(hours=48)
+    history_cutoff = now.astimezone(timezone.utc) - timedelta(days=HISTORY_DAYS + 1)
+    query = text(
+        "SELECT station, MAX(observed_at) AS latest_at, "
+        "COUNT(*) FILTER (WHERE observed_at >= :history_cutoff) AS history_rows, "
+        "COUNT(*) FILTER (WHERE pollutant = 'PM25' AND observed_at >= :coverage_cutoff) AS pm25_recent, "
+        "COUNT(*) FILTER (WHERE pollutant = 'PM10' AND observed_at >= :coverage_cutoff) AS pm10_recent "
+        "FROM cpcb_hourly WHERE source = :source AND value_avg IS NOT NULL "
+        "AND observed_at >= :history_cutoff GROUP BY station"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query, {
+            "source": SOURCE,
+            "history_cutoff": history_cutoff,
+            "coverage_cutoff": coverage_cutoff,
+        }).mappings().all()
+    by_station = {row["station"]: row for row in rows}
+    for station in STATIONS:
+        row = by_station.get(station)
+        if (row is None
+                or row["latest_at"] < fresh_cutoff
+                or row["history_rows"] < 3000
+                or row["pm25_recent"] < 18
+                or row["pm10_recent"] < 18):
+            return False
+    return True
+
+
 def main():
     started_at = datetime.now(timezone.utc)
     now = datetime.now(IST)
@@ -225,15 +263,26 @@ def main():
             written = upsert_dataframe(engine, "cpcb_hourly", data, pk_cols=PRIMARY_KEY)
         else:
             written = 0
+        used_existing_history = bool(failures) and _has_fresh_database_history(engine, now)
         finished_at = datetime.now(timezone.utc)
-        status = "failed" if failures else "ok"
-        message = "; ".join(failures) if failures else f"Fetched rolling {HISTORY_DAYS + 1}-day CPCB report window"
+        status = "ok" if not failures or used_existing_history else "failed"
+        if failures and used_existing_history:
+            message = ("CPCB report fetch unavailable; using fresh existing CPCB report history. "
+                       + "; ".join(failures))
+        elif failures:
+            message = "; ".join(failures)
+        else:
+            message = f"Fetched rolling {HISTORY_DAYS + 1}-day CPCB report window"
         log_run(engine, "cpcb_recent_report", started_at, finished_at, written, status, message)
     finally:
         engine.dispose()
 
     if failures:
-        raise RuntimeError("CPCB recent-history backfill failed: " + "; ".join(failures))
+        if used_existing_history:
+            print("CPCB report endpoint unavailable; existing fresh 45-day database history is usable. "
+                  "The feature-quality step will still validate the forecast inputs.")
+        else:
+            raise RuntimeError("CPCB recent-history backfill failed: " + "; ".join(failures))
     print(f"cpcb_hourly: upserted {written} rolling-window CPCB report rows")
 
 
